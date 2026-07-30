@@ -1,0 +1,12 @@
+# Staged MAME romsets (local copies; do not commit dumps)
+roms/
+*.zip
+
+# Local MegaFlash IIc ROM overlay (gitignored; place beside checkout or set IIC_BIN)
+iic.bin
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

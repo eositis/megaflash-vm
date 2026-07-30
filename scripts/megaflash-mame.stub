@@ -1,0 +1,9 @@
+# MegaFlash Apple-bus bring-up for MAME bridge (-a2bus-bridge).
+# PHI0 so IsAppleConnected(); core1launch for BusLoop. No USB console.
+# Launch core1 early so BusLoop RAM stays intact during cyw43_arch_init.
+# Wall-time driven under a2bus (see main.c script_poll).
+
+10ms: gpio20 1
+10ms: gpio19 0
+50ms: a2phi
+100ms: core1launch
