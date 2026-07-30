@@ -142,9 +142,57 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# SPI backing files live in this project (outside the GPIO). Relative defaults
+# under Bramble would create empty flash/ when the launcher cwd is megaflash-vm.
+FLASH_DIR="${MEGAFLASH_FLASH_DIR:-$ROOT/flash}"
+mkdir -p "$FLASH_DIR"
+SPI_FLASH1="${SPI_FLASH1:-$FLASH_DIR/spi-flash1.bin}"
+SPI_FLASH2="${SPI_FLASH2:-$FLASH_DIR/spi-flash2.bin}"
+USER_CFG="$FLASH_DIR/megaflash-user-config.bin"
+
+# Seed empty/missing volumes from the Bramble checkout (legacy location).
+seed_flash_if_empty() {
+  local dest="$1" src="$2" label="$3"
+  local need=0
+  if [[ ! -f "$dest" ]]; then
+    need=1
+  elif ! python3 - "$dest" <<'PY'
+import sys
+p = sys.argv[1]
+with open(p, "rb") as f:
+    sample = f.read(65536)
+sys.exit(0 if any(b not in (0, 0xFF) for b in sample) else 1)
+PY
+  then
+    need=1
+  fi
+  if [[ "$need" -eq 1 && -f "$src" ]]; then
+    echo "[mame] seeding $label from $src"
+    cp -f "$src" "$dest"
+  fi
+}
+
+if [[ -z "${NO_SPI_FLASH:-}" ]]; then
+  seed_flash_if_empty "$SPI_FLASH1" "$BRAMBLE_ROOT/flash/spi-flash1.bin" "spi-flash1"
+  seed_flash_if_empty "$SPI_FLASH2" "$BRAMBLE_ROOT/flash/spi-flash2.bin" "spi-flash2"
+  if [[ ! -f "$USER_CFG" && -f "$BRAMBLE_ROOT/flash/megaflash-user-config.bin" ]]; then
+    cp -f "$BRAMBLE_ROOT/flash/megaflash-user-config.bin" "$USER_CFG"
+    echo "[mame] seeded user-config from Bramble flash/"
+  fi
+fi
+
 SPI_FLASH_ARGS=()
 if [[ -z "${NO_SPI_FLASH:-}" ]]; then
-  SPI_FLASH_ARGS+=(-spi-flash1 -spi-flash2)
+  SPI_FLASH_ARGS+=(-spi-flash1 "$SPI_FLASH1" -spi-flash2 "$SPI_FLASH2")
+  if [[ ! -f "$SPI_FLASH1" ]] || ! python3 - "$SPI_FLASH1" <<'PY'
+import sys
+with open(sys.argv[1], "rb") as f:
+    sample = f.read(65536)
+sys.exit(0 if any(b not in (0, 0xFF) for b in sample) else 1)
+PY
+  then
+    echo "[mame] WARNING: $SPI_FLASH1 looks empty — SmartPort boot will fail until you upload a volume (USB/XMODEM) or copy a populated image into $FLASH_DIR" >&2
+  fi
 fi
 
 # MegaFlash Test Wifi / NTP use Pico SDK cyw43_arch against Bramble's CYW43
@@ -155,18 +203,23 @@ if [[ -z "${NO_WIFI:-}" ]]; then
 fi
 
 echo "[mame] Bramble=$BRAMBLE  stub=$STUB  port=$PORT"
+echo "[mame] flash1=$SPI_FLASH1"
 echo "[mame] starting Bramble MegaFlash bridge on 127.0.0.1:$PORT"
-"$BRAMBLE" "$UF2" \
-  -arch m33 \
-  -clock 150 \
-  -cores 2 \
-  -a2bus-bridge "$PORT" \
-  -script "$STUB" \
-  "${SPI_FLASH_ARGS[@]}" \
-  "${WIFI_ARGS[@]}" \
-  ${TIMEOUT:+-timeout "$TIMEOUT"} \
-  "${REGS_ARGS[@]}" \
-  "$@" &
+# cwd = this repo so relative flash/megaflash-user-config.bin resolves here.
+(
+  cd "$ROOT"
+  "$BRAMBLE" "$UF2" \
+    -arch m33 \
+    -clock 150 \
+    -cores 2 \
+    -a2bus-bridge "$PORT" \
+    -script "$STUB" \
+    "${SPI_FLASH_ARGS[@]}" \
+    "${WIFI_ARGS[@]}" \
+    ${TIMEOUT:+-timeout "$TIMEOUT"} \
+    "${REGS_ARGS[@]}" \
+    "$@"
+) &
 BRAMBLE_PID=$!
 
 python3 - "$PORT" <<'PY'

@@ -19,6 +19,7 @@ Bramble remains a general Pico / RP2350 emulator. This repo owns the MegaFlash +
 | [`scripts/mame_plugins/megaflash_bridge/`](scripts/mame_plugins/megaflash_bridge/) | Lua plugin: forward `$C0C0–$C0C3` over TCP; mute DS1216E NSC |
 | [`scripts/megaflash-mame.stub`](scripts/megaflash-mame.stub) | Bramble script: PHI0 + `core1launch` for MAME sessions |
 | [`scripts/a2bus-probe-settings.py`](scripts/a2bus-probe-settings.py) | Host probe of MegaFlash commands over the TCP bridge |
+| [`flash/`](flash/) | SPI volume backing files (gitignored; seeded from Bramble on first run) |
 | [`docs/MAME-BRIDGE.md`](docs/MAME-BRIDGE.md) | Operator guide |
 
 ## Sibling checkouts (default layout)

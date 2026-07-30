@@ -42,7 +42,7 @@ The Lua plugin must open the bridge socket with **READ|WRITE only** (no CREATE).
 
 Bramble must keep running for the whole MAME session: with `-a2bus-bridge` the usual 1B-instruction safety exit is disabled (same idea as stdin/GDB interactive mode). If you see `Instruction limit reached (1B)` then MegaFlash dies under MAME.
 
-SPI flash for MAME uses the same `-spi-flash1` / `-spi-flash2` backing files as the USB console (`flash/spi-flash*.bin`). Without those stubs, detect signatures still pass but `CMD_GETDEVSTATUS` returns **MFERR_NOFLASH** and the boot menu shows **MegaFlash Not Found**.
+SPI flash for MAME uses absolute paths under **this repo’s** `flash/spi-flash*.bin` (SmartPort boot volume 1 = first 32 MB of `spi-flash1.bin`). The launcher seeds empty/missing files from `../Bramble/flash/` when present. Without populated flash, detect may still pass but there is nothing to boot. User settings mirror is `flash/megaflash-user-config.bin` (Bramble opens that relative path; the launcher `cd`s here before start).
 
 MAME is started **without** a floppy/hard-disk image. The //c is expected to boot through MegaFlash SmartPort (PR#4 / “Boot MegaFlash”) from **flash volume 1** (first 32 MB of `flash/spi-flash1.bin`). That volume currently holds ProDOS **`A2.DESKTOP`** (same contents as `A2DeskTop.hdv`). Upload/replace via the USB console XMODEM path if needed.
 
@@ -83,6 +83,8 @@ Bring-up notes (a2bus):
 | `MEGAFLASH_UF2` | `../MegaFlash/pico/pico2_debug/megaflash.uf2` | Guest firmware |
 | `MEGAFLASH_ELF` | sibling `.elf` | Resolves `registers` BSS address |
 | `IIC_BIN` | `./iic.bin` or `../Bramble/iic.bin` | MegaFlash-patched system ROM |
+| `MEGAFLASH_FLASH_DIR` | `./flash` | SPI volume directory |
+| `SPI_FLASH1` / `SPI_FLASH2` | `$MEGAFLASH_FLASH_DIR/spi-flash{1,2}.bin` | Absolute backing paths passed to Bramble |
 | `MAME_ROMPATH` | `./roms` (staged) | Must **not** include Ample if you want MegaFlash maincpu |
 | `AMPLE_ROMS` | `~/Library/Application Support/Ample/roms` | Source for CHR/keyboard/speech staging only |
 | `BRAMBLE_IIC_BIN` | set by launcher to `IIC_BIN` | Optional Lua re-overlay path |

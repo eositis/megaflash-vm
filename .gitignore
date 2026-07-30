@@ -2,6 +2,9 @@
 roms/
 *.zip
 
+# MegaFlash SPI volumes + mirrored user config (large / machine-local)
+flash/
+
 # Local MegaFlash IIc ROM overlay (gitignored; place beside checkout or set IIC_BIN)
 iic.bin
 
