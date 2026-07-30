@@ -2,8 +2,18 @@
 roms/
 *.zip
 
+# Guest firmware binaries (sync from MegaFlash build; see firmware/README.md)
+firmware/*.uf2
+firmware/*.elf
+
 # MegaFlash SPI volumes + mirrored user config (large / machine-local)
-flash/
+flash/*.bin
+
+# Apple IIc MegaFlash ROM + reference HDV
+iic.bin
+A2DeskTop.hdv
+*.hdv
+*.po
 
 # MAME local runtime (created beside the launcher)
 cfg/
@@ -12,9 +22,6 @@ snap/
 inp/
 diff/
 hi/
-
-# Local MegaFlash IIc ROM overlay (gitignored; place beside checkout or set IIC_BIN)
-iic.bin
 
 # Editor / OS
 .DS_Store

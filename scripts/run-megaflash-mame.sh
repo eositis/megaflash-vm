@@ -9,16 +9,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BRAMBLE_ROOT="${BRAMBLE_ROOT:-$ROOT/../Bramble}"
 BRAMBLE="${BRAMBLE:-$BRAMBLE_ROOT/bramble}"
-UF2="${MEGAFLASH_UF2:-$ROOT/../MegaFlash/pico/pico2_debug/megaflash.uf2}"
-ELF="${MEGAFLASH_ELF:-$ROOT/../MegaFlash/pico/pico2_debug/megaflash.elf}"
-# Prefer iic.bin in this repo, then Bramble checkout (legacy location).
-if [[ -z "${IIC_BIN:-}" ]]; then
-  if [[ -f "$ROOT/iic.bin" ]]; then
-    IIC_BIN="$ROOT/iic.bin"
-  else
-    IIC_BIN="$BRAMBLE_ROOT/iic.bin"
-  fi
-fi
+# Guest assets live in this repo (not Bramble / not the MegaFlash build tree by default).
+UF2="${MEGAFLASH_UF2:-$ROOT/firmware/megaflash.uf2}"
+ELF="${MEGAFLASH_ELF:-$ROOT/firmware/megaflash.elf}"
+IIC_BIN="${IIC_BIN:-$ROOT/iic.bin}"
 STUB="$ROOT/scripts/megaflash-mame.stub"
 PORT="${BRAMBLE_A2BUS_PORT:-19765}"
 PLUGINPATH="$ROOT/scripts/mame_plugins"
@@ -59,11 +53,13 @@ if [[ ! -x "$BRAMBLE" ]]; then
   exit 1
 fi
 if [[ ! -f "$UF2" ]]; then
-  echo "UF2 not found: $UF2 (set MEGAFLASH_UF2)" >&2
+  echo "UF2 not found: $UF2" >&2
+  echo "  Copy from MegaFlash build: ./scripts/sync-firmware-from-megaflash.sh" >&2
+  echo "  or set MEGAFLASH_UF2=" >&2
   exit 1
 fi
 if [[ ! -f "$IIC_BIN" ]]; then
-  echo "MegaFlash IIc ROM not found: $IIC_BIN (set IIC_BIN or place iic.bin in $ROOT)" >&2
+  echo "MegaFlash IIc ROM not found: $IIC_BIN (place iic.bin in $ROOT or set IIC_BIN)" >&2
   exit 1
 fi
 if ! command -v "$MAME_BIN" >/dev/null 2>&1; then
@@ -142,44 +138,11 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# SPI backing files live in this project (outside the GPIO). Relative defaults
-# under Bramble would create empty flash/ when the launcher cwd is megaflash-vm.
+# SPI backing files live in this project (outside the GPIO).
 FLASH_DIR="${MEGAFLASH_FLASH_DIR:-$ROOT/flash}"
 mkdir -p "$FLASH_DIR"
 SPI_FLASH1="${SPI_FLASH1:-$FLASH_DIR/spi-flash1.bin}"
 SPI_FLASH2="${SPI_FLASH2:-$FLASH_DIR/spi-flash2.bin}"
-USER_CFG="$FLASH_DIR/megaflash-user-config.bin"
-
-# Seed empty/missing volumes from the Bramble checkout (legacy location).
-seed_flash_if_empty() {
-  local dest="$1" src="$2" label="$3"
-  local need=0
-  if [[ ! -f "$dest" ]]; then
-    need=1
-  elif ! python3 - "$dest" <<'PY'
-import sys
-p = sys.argv[1]
-with open(p, "rb") as f:
-    sample = f.read(65536)
-sys.exit(0 if any(b not in (0, 0xFF) for b in sample) else 1)
-PY
-  then
-    need=1
-  fi
-  if [[ "$need" -eq 1 && -f "$src" ]]; then
-    echo "[mame] seeding $label from $src"
-    cp -f "$src" "$dest"
-  fi
-}
-
-if [[ -z "${NO_SPI_FLASH:-}" ]]; then
-  seed_flash_if_empty "$SPI_FLASH1" "$BRAMBLE_ROOT/flash/spi-flash1.bin" "spi-flash1"
-  seed_flash_if_empty "$SPI_FLASH2" "$BRAMBLE_ROOT/flash/spi-flash2.bin" "spi-flash2"
-  if [[ ! -f "$USER_CFG" && -f "$BRAMBLE_ROOT/flash/megaflash-user-config.bin" ]]; then
-    cp -f "$BRAMBLE_ROOT/flash/megaflash-user-config.bin" "$USER_CFG"
-    echo "[mame] seeded user-config from Bramble flash/"
-  fi
-fi
 
 SPI_FLASH_ARGS=()
 if [[ -z "${NO_SPI_FLASH:-}" ]]; then
@@ -191,7 +154,8 @@ with open(sys.argv[1], "rb") as f:
 sys.exit(0 if any(b not in (0, 0xFF) for b in sample) else 1)
 PY
   then
-    echo "[mame] WARNING: $SPI_FLASH1 looks empty — SmartPort boot will fail until you upload a volume (USB/XMODEM) or copy a populated image into $FLASH_DIR" >&2
+    echo "[mame] WARNING: $SPI_FLASH1 missing or empty — SmartPort boot needs a populated volume in $FLASH_DIR" >&2
+    echo "  (upload via USB/XMODEM, or restore spi-flash1.bin / A2DeskTop.hdv contents)" >&2
   fi
 fi
 

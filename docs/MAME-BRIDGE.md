@@ -6,12 +6,13 @@ Operator guide for **megaflash-vm**: link MAME’s Apple //c (rev 4, `apple2c4`)
 
 ## Prerequisites
 
-1. **Sibling checkouts:** `../Bramble`, `../MegaFlash`, and this repo
+1. **Sibling checkouts:** `../Bramble`, `../MegaFlash` (build tree), and this repo
 2. **Build Bramble:** in `../Bramble`: `cmake -B build && make -C build bramble bramble_tests`
-3. **MegaFlash UF2/ELF:** default `../MegaFlash/pico/pico2_debug/megaflash.{uf2,elf}`
-4. **MegaFlash IIc ROM:** place `iic.bin` (32 KiB) at this repo root, or leave it in `../Bramble/iic.bin` (launcher checks both)
-5. **MAME:** `brew install mame` (or set `MAME=/path/to/mame`)
-6. **Stock companion dumps** (CHR, keyboard, Votrax `sc01a.bin`). On macOS with Ample, the launcher copies them from
+3. **Guest firmware in this repo:** `firmware/megaflash.uf2` (and optional `.elf`) — run `./scripts/sync-firmware-from-megaflash.sh` after building MegaFlash
+4. **MegaFlash IIc ROM:** `iic.bin` (32 KiB) at this repo root
+5. **SPI volumes:** `flash/spi-flash1.bin` / `spi-flash2.bin` (SmartPort boot from volume 1)
+6. **MAME:** `brew install mame` (or set `MAME=/path/to/mame`)
+7. **Stock companion dumps** (CHR, keyboard, Votrax `sc01a.bin`). On macOS with Ample, the launcher copies them from
    `~/Library/Application Support/Ample/roms` into `./roms/` and stages **`iic.bin` as `3410445b.256`**.
 
 **Important:** rompath is **local `./roms` only**. If Ample stays on the rompath, MAME prefers the CRC-matching stock `3410445b.256` and silently ignores MegaFlash’s ROM — you get stock Slinky (“unable to start from memory card”) and no MegaFlash boot menu.
@@ -42,7 +43,7 @@ The Lua plugin must open the bridge socket with **READ|WRITE only** (no CREATE).
 
 Bramble must keep running for the whole MAME session: with `-a2bus-bridge` the usual 1B-instruction safety exit is disabled (same idea as stdin/GDB interactive mode). If you see `Instruction limit reached (1B)` then MegaFlash dies under MAME.
 
-SPI flash for MAME uses absolute paths under **this repo’s** `flash/spi-flash*.bin` (SmartPort boot volume 1 = first 32 MB of `spi-flash1.bin`). The launcher seeds empty/missing files from `../Bramble/flash/` when present. Without populated flash, detect may still pass but there is nothing to boot. User settings mirror is `flash/megaflash-user-config.bin` (Bramble opens that relative path; the launcher `cd`s here before start).
+SPI flash for MAME uses absolute paths under **this repo’s** `flash/spi-flash*.bin` (SmartPort boot volume 1 = first 32 MB of `spi-flash1.bin`). Without populated flash, detect may still pass but there is nothing to boot. User settings mirror is `flash/megaflash-user-config.bin` (Bramble opens that relative path; the launcher `cd`s here before start). Bramble’s `flash/` is a symlink to this directory so USB-console runs share the same volumes.
 
 MAME is started **without** a floppy/hard-disk image. The //c is expected to boot through MegaFlash SmartPort (PR#4 / “Boot MegaFlash”) from **flash volume 1** (first 32 MB of `flash/spi-flash1.bin`). That volume currently holds ProDOS **`A2.DESKTOP`** (same contents as `A2DeskTop.hdv`). Upload/replace via the USB console XMODEM path if needed.
 
@@ -80,9 +81,9 @@ Bring-up notes (a2bus):
 | `BRAMBLE_ROOT` | `../Bramble` | Bramble checkout (binary under `bramble` or `build/bramble`) |
 | `BRAMBLE` | `$BRAMBLE_ROOT/bramble` | Emulator binary override |
 | `BRAMBLE_A2BUS_PORT` | `19765` | TCP port (Bramble listen + MAME plugin) |
-| `MEGAFLASH_UF2` | `../MegaFlash/pico/pico2_debug/megaflash.uf2` | Guest firmware |
-| `MEGAFLASH_ELF` | sibling `.elf` | Resolves `registers` BSS address |
-| `IIC_BIN` | `./iic.bin` or `../Bramble/iic.bin` | MegaFlash-patched system ROM |
+| `MEGAFLASH_UF2` | `./firmware/megaflash.uf2` | Guest firmware |
+| `MEGAFLASH_ELF` | `./firmware/megaflash.elf` | Resolves `registers` BSS address |
+| `IIC_BIN` | `./iic.bin` | MegaFlash-patched system ROM |
 | `MEGAFLASH_FLASH_DIR` | `./flash` | SPI volume directory |
 | `SPI_FLASH1` / `SPI_FLASH2` | `$MEGAFLASH_FLASH_DIR/spi-flash{1,2}.bin` | Absolute backing paths passed to Bramble |
 | `MAME_ROMPATH` | `./roms` (staged) | Must **not** include Ample if you want MegaFlash maincpu |

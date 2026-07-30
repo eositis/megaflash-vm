@@ -19,7 +19,8 @@ Bramble remains a general Pico / RP2350 emulator. This repo owns the MegaFlash +
 | [`scripts/mame_plugins/megaflash_bridge/`](scripts/mame_plugins/megaflash_bridge/) | Lua plugin: forward `$C0C0–$C0C3` over TCP; mute DS1216E NSC |
 | [`scripts/megaflash-mame.stub`](scripts/megaflash-mame.stub) | Bramble script: PHI0 + `core1launch` for MAME sessions |
 | [`scripts/a2bus-probe-settings.py`](scripts/a2bus-probe-settings.py) | Host probe of MegaFlash commands over the TCP bridge |
-| [`flash/`](flash/) | SPI volume backing files (gitignored; seeded from Bramble on first run) |
+| [`firmware/`](firmware/) | Guest `megaflash.uf2` / `.elf` (gitignored binaries) |
+| [`flash/`](flash/) | SPI volume backing files (gitignored `*.bin`) |
 | [`docs/MAME-BRIDGE.md`](docs/MAME-BRIDGE.md) | Operator guide |
 
 ## Sibling checkouts (default layout)
@@ -27,9 +28,20 @@ Bramble remains a general Pico / RP2350 emulator. This repo owns the MegaFlash +
 ```
 GitHub/
   Bramble/          # Pico/RP2350 emulator (+ -a2bus-bridge)
-  MegaFlash/        # megaflash.uf2 / .elf
-  megaflash-vm/     # this project
+  MegaFlash/        # firmware *source* / build tree
+  megaflash-vm/     # this project — runtime assets + MAME glue
 ```
+
+## Runtime assets (this repo)
+
+| Path | Role |
+|------|------|
+| `firmware/megaflash.uf2` (+ `.elf`) | Guest firmware loaded by Bramble |
+| `flash/spi-flash*.bin` | SPI volume backing (SmartPort boot) |
+| `iic.bin` | MegaFlash-patched Apple //c system ROM for MAME |
+| `A2DeskTop.hdv` | Reference ProDOS image for volume 1 (optional) |
+
+Refresh UF2/ELF after a MegaFlash rebuild: `./scripts/sync-firmware-from-megaflash.sh`
 
 ## Quick start
 
@@ -38,7 +50,7 @@ GitHub/
 ./scripts/run-megaflash-mame.sh
 ```
 
-Requires: built `../Bramble/build/bramble` (or `../Bramble/bramble`), MegaFlash UF2, `iic.bin` (see docs), MAME, Ample companion dumps for CHR/keyboard/speech.
+Requires: built Bramble, `firmware/megaflash.uf2`, `flash/spi-flash*.bin`, `iic.bin`, MAME, Ample companion dumps for CHR/keyboard/speech.
 
 Environment overrides: `BRAMBLE`, `BRAMBLE_ROOT`, `MEGAFLASH_UF2`, `MEGAFLASH_ELF`, `IIC_BIN`, `MAME`, `BRAMBLE_A2BUS_PORT` — see [`docs/MAME-BRIDGE.md`](docs/MAME-BRIDGE.md).
 
