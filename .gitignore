@@ -2,6 +2,10 @@
 roms/
 *.zip
 
+# Overlay build output
+build/
+bramble
+
 # Guest firmware binaries (sync from MegaFlash build; see firmware/README.md)
 firmware/*.uf2
 firmware/*.elf

@@ -6,16 +6,22 @@ Integration project that links **MAME** (Apple //c) to **MegaFlash** firmware ru
 
 | Layer | Project | Responsibility |
 |-------|---------|----------------|
-| Inside the virtual GPIO / Apple-bus pins | [Bramble](../Bramble) | RP2350/M33 CPU, PIO, `a2bus` pin inject, `-a2bus-bridge` TCP endpoint that drives those pins, MegaFlash guest stubs |
-| Outside the pins | **this repo** | MAME plugin, launch/orchestration, bus bring-up stub passed *into* Bramble, probe tools, operator docs |
+| Inside the virtual GPIO / Apple-bus pins (inject) | **this repo’s overlay `bramble`** | `a2bus` pin inject, `-a2bus-bridge`, temporary MegaFlash guest stubs |
+| Pico emulator core + SPI flash files | [Bramble](../Bramble) | RP2350/M33 CPU, PIO, USB/UART, `-spi-flash*`, weak `bramble_ext_*` hooks |
+| Outside the pins (host glue) | **this repo** | MAME plugin, launcher, orchestration, firmware/flash assets, docs |
 
-Bramble remains a general Pico / RP2350 emulator. This repo owns the MegaFlash + MAME *virtual machine* experience around it.
+Build the overlay binary (required for MAME):
+
+```bash
+cmake -B build && make -C build bramble
+```
 
 ## Components
 
 | Path | Role |
 |------|------|
-| [`scripts/run-megaflash-mame.sh`](scripts/run-megaflash-mame.sh) | Start Bramble + wait for BusLoop + launch `mame apple2c4` |
+| [`scripts/run-megaflash-mame.sh`](scripts/run-megaflash-mame.sh) | Start overlay Bramble + wait for BusLoop + launch `mame apple2c4` |
+| [`bramble-overlay/`](bramble-overlay/) | Apple-bus + MegaFlash hooks linked into `./bramble` |
 | [`scripts/mame_plugins/megaflash_bridge/`](scripts/mame_plugins/megaflash_bridge/) | Lua plugin: forward `$C0C0–$C0C3` over TCP; mute DS1216E NSC |
 | [`scripts/megaflash-mame.stub`](scripts/megaflash-mame.stub) | Bramble script: PHI0 + `core1launch` for MAME sessions |
 | [`scripts/a2bus-probe-settings.py`](scripts/a2bus-probe-settings.py) | Host probe of MegaFlash commands over the TCP bridge |
@@ -50,7 +56,7 @@ Refresh UF2/ELF after a MegaFlash rebuild: `./scripts/sync-firmware-from-megafla
 ./scripts/run-megaflash-mame.sh
 ```
 
-Requires: built Bramble, `firmware/megaflash.uf2`, `flash/spi-flash*.bin`, `iic.bin`, MAME, Ample companion dumps for CHR/keyboard/speech.
+Requires: overlay `./bramble` (see above), `firmware/megaflash.uf2`, `flash/spi-flash*.bin`, `iic.bin`, MAME, Ample companion dumps for CHR/keyboard/speech.
 
 Environment overrides: `BRAMBLE`, `BRAMBLE_ROOT`, `MEGAFLASH_UF2`, `MEGAFLASH_ELF`, `IIC_BIN`, `MAME`, `BRAMBLE_A2BUS_PORT` — see [`docs/MAME-BRIDGE.md`](docs/MAME-BRIDGE.md).
 

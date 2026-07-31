@@ -2,12 +2,12 @@
 
 Operator guide for **megaflash-vm**: link MAME’s Apple //c (rev 4, `apple2c4`) to MegaFlash running under **Bramble**. Slot‑4 soft‑switches `$C0C0–$C0C3` are forwarded over TCP to Bramble’s Apple-bus injector (`-a2bus-bridge`).
 
-**Project split:** anything *inside* the virtual GPIO / Apple-bus pins lives in Bramble (`a2bus`, bridge server, guest stubs). This repo owns the MAME plugin, launcher, bring-up stub, and probes *outside* those pins. See [README.md](../README.md).
+**Project split:** stock **Bramble** is a Pico emulator (`-spi-flash*`, no Apple code). This repo builds an **overlay `bramble`** (`cmake -B build && make -C build bramble`) that adds Apple-bus inject + `-a2bus-bridge` + temporary MegaFlash guest stubs. MAME Lua talks to that overlay over TCP.
 
 ## Prerequisites
 
 1. **Sibling checkouts:** `../Bramble`, `../MegaFlash` (build tree), and this repo
-2. **Build Bramble:** in `../Bramble`: `cmake -B build && make -C build bramble bramble_tests`
+2. **Build overlay Bramble:** `cmake -B build && make -C build bramble` (in this repo)
 3. **Guest firmware in this repo:** `firmware/megaflash.uf2` (and optional `.elf`) — run `./scripts/sync-firmware-from-megaflash.sh` after building MegaFlash
 4. **MegaFlash IIc ROM:** `iic.bin` (32 KiB) at this repo root
 5. **SPI volumes:** `flash/spi-flash1.bin` / `spi-flash2.bin` (SmartPort boot from volume 1)
@@ -78,8 +78,8 @@ Bring-up notes (a2bus):
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `BRAMBLE_ROOT` | `../Bramble` | Bramble checkout (binary under `bramble` or `build/bramble`) |
-| `BRAMBLE` | `$BRAMBLE_ROOT/bramble` | Emulator binary override |
+| `BRAMBLE` | `./bramble` or `./build/bramble` | Overlay emulator binary (Apple-bus enabled) |
+| `BRAMBLE_ROOT` | `../Bramble` | Stock Bramble sources used by overlay CMake |
 | `BRAMBLE_A2BUS_PORT` | `19765` | TCP port (Bramble listen + MAME plugin) |
 | `MEGAFLASH_UF2` | `./firmware/megaflash.uf2` | Guest firmware |
 | `MEGAFLASH_ELF` | `./firmware/megaflash.elf` | Resolves `registers` BSS address |
@@ -130,14 +130,13 @@ CRC: expect **WRONG CHECKSUM** for `3410445b.256` when MegaFlash `iic.bin` is st
 
 ## Files
 
-**This repo (outside the pins):**
+**This repo (overlay + outside the pins):**
 
+- [`bramble-overlay/`](../bramble-overlay/) — `a2bus`, TCP bridge, temporary guest hooks
 - [`scripts/mame_plugins/megaflash_bridge/`](../scripts/mame_plugins/megaflash_bridge/) — MAME Lua plugin
 - [`scripts/run-megaflash-mame.sh`](../scripts/run-megaflash-mame.sh) — launcher
-- [`scripts/megaflash-mame.stub`](../scripts/megaflash-mame.stub) — PHI / core1 bring-up (fed to Bramble `-script`)
-- [`scripts/a2bus-probe-settings.py`](../scripts/a2bus-probe-settings.py) — host probe over TCP
+- [`scripts/megaflash-mame.stub`](../scripts/megaflash-mame.stub) — PHI / core1 bring-up
 
-**Bramble (inside / pin face):**
+**Stock Bramble (Pico emulator):**
 
-- `../Bramble/src/a2bus_bridge.c` — TCP server that drives virtual Apple-bus GPIO
-- `../Bramble/src/a2bus.c` — bus inject / PHI0 / register shadow
+- `../Bramble` — CPU/PIO/USB/UART/`-spi-flash*`; weak `bramble_ext_*` hooks (empty without overlay)

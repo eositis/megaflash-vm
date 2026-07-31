@@ -8,7 +8,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BRAMBLE_ROOT="${BRAMBLE_ROOT:-$ROOT/../Bramble}"
-BRAMBLE="${BRAMBLE:-$BRAMBLE_ROOT/bramble}"
+# Prefer overlay binary from this repo (Apple-bus + MegaFlash hooks).
+if [[ -z "${BRAMBLE:-}" ]]; then
+  if [[ -x "$ROOT/bramble" ]]; then
+    BRAMBLE="$ROOT/bramble"
+  elif [[ -x "$ROOT/build/bramble" ]]; then
+    BRAMBLE="$ROOT/build/bramble"
+  else
+    BRAMBLE="$BRAMBLE_ROOT/bramble"
+  fi
+fi
 # Guest assets live in this repo (not Bramble / not the MegaFlash build tree by default).
 UF2="${MEGAFLASH_UF2:-$ROOT/firmware/megaflash.uf2}"
 ELF="${MEGAFLASH_ELF:-$ROOT/firmware/megaflash.elf}"
@@ -47,9 +56,9 @@ if [[ ! -x "$BRAMBLE" ]]; then
   BRAMBLE="$BRAMBLE_ROOT/build/bramble"
 fi
 if [[ ! -x "$BRAMBLE" ]]; then
-  echo "bramble not found under $BRAMBLE_ROOT" >&2
-  echo "  build with: cmake -B build && make -C build bramble  (in Bramble)" >&2
-  echo "  or set BRAMBLE= / BRAMBLE_ROOT=" >&2
+  echo "overlay bramble not found" >&2
+  echo "  build with: cmake -B build && make -C build bramble  (in megaflash-vm)" >&2
+  echo "  or set BRAMBLE= to an overlay-built binary" >&2
   exit 1
 fi
 if [[ ! -f "$UF2" ]]; then
