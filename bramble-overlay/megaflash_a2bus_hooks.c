@@ -206,31 +206,62 @@ static void a2bus_ensure_malloc_mutex(void) {
 }
 
 /*
- * Opt into BusLoop-safe cyw43 stubs (no real JOIN / DNS / NTP). Default is real
- * CYW43 so MegaFlash Test Wifi / GetNetworkTime use hostif when -wifi [-tap].
- * Empty-SSID still fails fast: those paths throw C++ exceptions Bramble cannot unwind.
+ * Boot-time cyw43_arch_init (InitPicoLed on core0) must be stubbed while
+ * BusLoopSlinky runs on core1 — concurrent real gSPI HardFaults BusLoop and
+ * MAME reports "MegaFlash not found".
+ *
+ * Default: stub boot init; on first TestWifi / GetNetworkTime with a configured
+ * SSID, clear s_cyw43Inited and allow real JOIN/DNS/NTP (hostif when -tap).
+ *
+ * BRAMBLE_A2BUS_REAL_WIFI=1  — never stub (BusLoop may die; debug only)
+ * BRAMBLE_A2BUS_STUB_WIFI=1  — always stub boot helpers (no deferred real path)
  */
-static int a2bus_stub_wifi(void) {
-    static int cached = -1;
-    if (cached < 0) {
-        const char *e = getenv("BRAMBLE_A2BUS_STUB_WIFI");
-        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
-        if (cached) {
-            fprintf(stderr,
-                    "[A2Bus] BRAMBLE_A2BUS_STUB_WIFI=1 — stub cyw43_arch_init "
-                    "(no synthetic TestWifi/NTP results)\n");
+static int a2bus_wifi_defer_real = 1; /* cleared when diagnostics request net */
+
+static int a2bus_boot_stub_cyw43(void) {
+    static int policy = -1; /* 0=never stub, 1=always stub, 2=defer (default) */
+    if (policy < 0) {
+        const char *real = getenv("BRAMBLE_A2BUS_REAL_WIFI");
+        const char *stub = getenv("BRAMBLE_A2BUS_STUB_WIFI");
+        if (real && real[0] == '1' && real[1] == '\0') {
+            policy = 0;
+            a2bus_wifi_defer_real = 0;
+            fprintf(stderr, "[A2Bus] BRAMBLE_A2BUS_REAL_WIFI=1 — no boot cyw43 stub\n");
+        } else if (stub && stub[0] == '1' && stub[1] == '\0') {
+            policy = 1;
+            a2bus_wifi_defer_real = 0;
+            fprintf(stderr, "[A2Bus] BRAMBLE_A2BUS_STUB_WIFI=1 — cyw43 stub only\n");
         } else {
-            fprintf(stderr, "[A2Bus] real CYW43 path (DNS/NTP via hostif when -tap)\n");
+            policy = 2;
+            fprintf(stderr,
+                    "[A2Bus] boot-stub cyw43_arch_init (BusLoop-safe); "
+                    "real JOIN/DNS/NTP on TestWifi/NTP with SSID\n");
         }
     }
-    return cached;
+    if (policy == 0) {
+        return 0;
+    }
+    if (policy == 1) {
+        return 1;
+    }
+    return a2bus_wifi_defer_real;
+}
+
+static void a2bus_arm_real_wifi_for_diagnostics(void) {
+    if (!a2bus_wifi_defer_real) {
+        return;
+    }
+    a2bus_wifi_defer_real = 0;
+    mem_write8(0x200615fcu, 0u); /* s_cyw43Inited — force real cyw43_arch_init */
+    fprintf(stderr,
+            "[A2Bus] arming real CYW43 for network diagnostic "
+            "(DNS/NTP via hostif when -tap)\n");
+    fflush(stderr);
 }
 
 /*
  * Empty-SSID TestWifi/NTP uses C++ exceptions (__cxa_throw). Fail fast SSIDNOTSET.
- * Configured SSID: fall through to firmware + Bramble CYW43 (real diagnostics).
- * BRAMBLE_A2BUS_STUB_WIFI=1: stub only cyw43_arch_init / LED / InitCyw43 / ConnectWifi
- * so BusLoop can survive without host net (TestWifi then fails in firmware, not fake OK).
+ * Configured SSID: arm real CYW43 (after BusLoop is up) and fall through to firmware.
  */
 static int a2bus_wifi_hooks(void) {
     if (!a2bus_bridge_active() || !cyw43.enabled) {
@@ -268,11 +299,11 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
-    if (a2bus_stub_wifi()) {
+    if (a2bus_boot_stub_cyw43()) {
         if (pc == USB_GUEST_CYW43_ARCH_INIT) {
             static int once;
             if (!once++) {
-                fprintf(stderr, "[A2Bus] stub cyw43_arch_init (BRAMBLE_A2BUS_STUB_WIFI=1)\n");
+                fprintf(stderr, "[A2Bus] stub cyw43_arch_init (boot; BusLoop-safe)\n");
             }
             mem_write8(0x200615fcu, 1u); /* s_cyw43Inited */
             cpu.r[0] = 0;
@@ -292,6 +323,10 @@ static int a2bus_wifi_hooks(void) {
             cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
             return 1;
         }
+    } else if (pc == USB_GUEST_CYW43_GPIO_PUT) {
+        /* LED toggles during real init are harmless to stub. */
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
     }
 
     if (pc != USB_GUEST_DO_TEST_WIFI && pc != USB_GUEST_GET_NETWORK_TIME &&
@@ -302,6 +337,7 @@ static int a2bus_wifi_hooks(void) {
 
     /* Configured SSID: real firmware JOIN / DHCP / DNS / NTP (no synthetic OK). */
     if (mem_read8(USB_GUEST_WIFI_SSID) != 0u) {
+        a2bus_arm_real_wifi_for_diagnostics();
         return 0;
     }
 

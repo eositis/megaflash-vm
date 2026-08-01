@@ -51,7 +51,7 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP** use the real Pico SDK / CYW43 path (JOIN, DHCP, DNS, NTP) when `-wifi` is on. The launcher passes `-wifi -tap` by default so guest traffic goes through macOS **utun** + **pf NAT** (or Linux TAP). Empty SSID still fails fast with `NETERR_SSIDNOTSET` (C++ exception paths hang under Bramble EH). Opt out: `NO_WIFI=1`, `NO_HOST_NET=1` (`-wifi` without tap), or `BRAMBLE_A2BUS_STUB_WIFI=1` (stub `cyw43_arch_init` only — no fake “OK” results).
+**Test Wifi / NTP** use the real Pico SDK / CYW43 path (JOIN, DHCP, DNS, NTP) when a configured SSID triggers diagnostics. **Boot** still stubs `cyw43_arch_init` (InitPicoLed) so BusLoopSlinky stays alive — concurrent real gSPI + BusLoop HardFaults core1 and MAME reports MegaFlash not found. The launcher passes `-wifi -tap` by default so guest traffic goes through macOS **utun** + **pf NAT** (or Linux TAP). Empty SSID still fails fast with `NETERR_SSIDNOTSET` (C++ exception paths hang under Bramble EH). Opt out: `NO_WIFI=1`, `NO_HOST_NET=1` (`-wifi` without tap), `BRAMBLE_A2BUS_STUB_WIFI=1` (never arm real JOIN), or `BRAMBLE_A2BUS_REAL_WIFI=1` (no boot stub — debug only, BusLoop may die).
 
 On **macOS**, the launcher uses `sudo -A` with `scripts/macos-sudo-askpass.sh` so you get a **GUI admin dialog** once: enable pf NAT for `192.168.4.0/24`, then start Bramble as root for utun. Approve that dialog, wait for BusLoop ready, then MAME starts.
 
@@ -63,14 +63,14 @@ Firmware `[u2macraw]` telemetry from `U2_Net_Poll` is suppressed on a2bus stderr
 
 When MAME exits, Bramble shuts down: the launcher no longer `exec`s MAME (so its EXIT trap can kill Bramble), and the bridge also requests exit after a client that issued READ/WRITE disconnects (preflight PING/PEEK alone does not).
 
-**Host NAT / real internet:** See Bramble `docs/eositis/MACOS-WIFI.md`. Launcher helper: `scripts/macos-host-net-prep.sh` → Bramble `macos-cyw43-pf-nat.sh`. Note: concurrent real `cyw43_arch_init` + BusLoop was previously observed to HardFault core1 during CLM load — if boot dies after enabling host net, set `BRAMBLE_A2BUS_STUB_WIFI=1` temporarily and report.
+**Host NAT / real internet:** See Bramble `docs/eositis/MACOS-WIFI.md`. Launcher helper: `scripts/macos-host-net-prep.sh` → Bramble `macos-cyw43-pf-nat.sh`.
 
 Bring-up notes (a2bus):
 
-- Skip `stdio_usb_init` so core0 reaches `InitPicoLed` / real `cyw43_arch_init` (unless `BRAMBLE_A2BUS_STUB_WIFI=1`).
+- Skip `stdio_usb_init` so core0 reaches `InitPicoLed`; stub boot `cyw43_arch_init` until TestWifi/NTP with SSID arms real CYW43.
 - Host-format `__wrap_printf`, stub `hw_claim_*` / `check_alloc`, skip firmware `multicore_launch` when the script already started core1.
 - Force `CheckPicoW()==true` when `-wifi` is on.
-- Default `-tap` / pf (macOS) so Test Wifi DNS/NTP are real diagnostics.
+- Default `-tap` / pf (macOS) so Test Wifi DNS/NTP are real diagnostics after BusLoop is up.
 
 `CMD_COLDSTART` must finish before the Apple reads `configbyte1`. The bridge pump waits for a full STATUS **BUSY→idle** cycle (no early exit if BUSY was never seen). A premature return left `configbyte1=0`, which clears `AUTOBOOTFLAG` and makes the IIc firmware skip slot 4 (`NEXTBOOTSLOT=$C6`).
 
@@ -93,7 +93,8 @@ Bring-up notes (a2bus):
 | `TIMEOUT` | unset (none) | Bramble `-timeout` seconds |
 | `NO_WIFI` | unset | `1` = do not pass `-wifi` |
 | `NO_HOST_NET` | unset | `1` = `-wifi` without `-tap` / pf |
-| `BRAMBLE_A2BUS_STUB_WIFI` | unset | `1` = stub `cyw43_arch_init` (BusLoop bring-up; no fake TestWifi OK) |
+| `BRAMBLE_A2BUS_STUB_WIFI` | unset | `1` = never arm real JOIN (boot stub only) |
+| `BRAMBLE_A2BUS_REAL_WIFI` | unset | `1` = no boot cyw43 stub (BusLoop may die; debug) |
 | `BRAMBLE_A2BUS_SEED_WIFI` | unset | `1` = seed BrambleNet SSID/password in config |
 | `BRAMBLE_A2BUS_U2MACRAW` | unset | `1` = print firmware `[u2macraw]` poll telemetry |
 
