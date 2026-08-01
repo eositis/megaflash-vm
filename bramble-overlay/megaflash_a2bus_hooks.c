@@ -906,7 +906,23 @@ static int a2bus_spi_flash_hooks(void) {
         usb_guest_return_to_lr(cpu.r[0]);
         return 1;
     }
-    /* Host-format guest printf — newlib _vfprintf_r is too slow on a2bus. */
+    /*
+     * Host-format guest printf. Never enter newlib _vfprintf_r under a2bus:
+     * dual-core smash turns mbtowc into 0x30034280 → HardFault → BusLoop stuck
+     * → boot-menu option 7 "MegaFlash Not Found" even though SmartPort worked.
+     */
+    if (pc == USB_GUEST_VFPRINTF_R) {
+        usb_guest_return_to_lr(0);
+        return 1;
+    }
+    if (pc == USB_GUEST_WRAP_VPRINTF) {
+        usb_guest_set_vprintf_tx(usb_guest_a2bus_tx_byte);
+        int n = usb_guest_host_vprintf(cpu.r[0],
+                                       usb_guest_uart_make_ap(cpu.r[13]));
+        fflush(stderr);
+        usb_guest_return_to_lr((uint32_t)n);
+        return 1;
+    }
     if (pc == USB_GUEST_WRAP_PRINTF) {
         static int printf_logged;
         if (!printf_logged++) {
@@ -917,6 +933,21 @@ static int a2bus_spi_flash_hooks(void) {
                                        usb_guest_uart_make_ap(cpu.r[13]));
         fflush(stderr);
         usb_guest_return_to_lr((uint32_t)n);
+        return 1;
+    }
+    if (pc == USB_GUEST_ASCII_MBTOWC || pc == (USB_GUEST_ASCII_MBTOWC | 0x20000000u)) {
+        int ret = 0;
+        if (cpu.r[1] != 0u && cpu.r[2] != 0u) {
+            mem_write32(cpu.r[1], (uint32_t)mem_read8(cpu.r[2]));
+            ret = 1;
+        }
+        {
+            uint32_t loc = 0x20004f00u + 0x1ccu;
+            if ((mem_read32(loc) & ~1u) == (USB_GUEST_ASCII_MBTOWC | 0x20000000u)) {
+                mem_write32(loc, USB_GUEST_ASCII_MBTOWC | 1u);
+            }
+        }
+        usb_guest_return_to_lr((uint32_t)ret);
         return 1;
     }
     if (pc == USB_GUEST_WRAP_PUTS) {

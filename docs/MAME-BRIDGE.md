@@ -132,6 +132,8 @@ Script PHI0 enables `IsAppleConnected`. BusLoop core1 is launched by a2bus hooks
 
 Control-panel **Save** must not run real SPI security-register programming under a2bus (`EncryptWriteConfigToFlash` would leave STATUS BUSY and freeze on **Saving...**). Settings (including Wi‑Fi SSID/password) are applied in SRAM and the full 512-byte `configBuffer` is mirrored to `flash/megaflash-user-config.bin`, then reloaded on the next `LoadAllConfigs`.
 
+**Boot-menu option 7 / “MegaFlash Not Found” after SmartPort worked:** usually BusLoop left the Apple bus (often stuck in newlib `_vfprintf_r` after a dual-core locale smash to PC `0x30034280`). a2bus now stubs `_vfprintf_r`, and Bramble remaps corrupt `0x30xxxxxx` flash targets when `-wifi` is on.
+
 **Open-Apple device info:** Hold **Open-Apple** while the Control Panel **starts** (before the main menu appears) — not a numbered menu item. On the real IIc, Open-Apple is the solid-apple key **left** of the space bar (`$C061` / button 0). In MAME that is **Left Option/Alt** by default; the launcher `scripts/mame_cfg/apple2c4.cfg` also accepts **Left ⌘** so the left modifier matches the physical key. That path calls `GetInfoString` → `GetDeviceInfoString`. Native `sprintf(%f)` hangs under Bramble and can leave STATUS BUSY (later actions look like “MegaFlash not available”), so a2bus host-completes `DoGetInfoString`.
 
 **“Option 7” confusion:** Boot-menu **`7) Control Panel`** loads the CP (`CMD_LOAD_CPANEL`). Inside the IIc CP, the 7th highlighted item is usually **Test Wifi/NTP** (1-based). Test Wifi timeout text is `No response from MegaFlash` — different from boot-menu `MegaFlash Not Found`.
