@@ -1214,6 +1214,78 @@ static int a2bus_spi_flash_hooks(void) {
         usb_guest_stub_copy_memory_entry();
         return 1;
     }
+    /*
+     * Host-complete LOAD_CPANEL / GETDEVINFO so BusLoop never stalls on DMA or
+     * flash walks. Option 7 and Ctrl-Reset chkmegaflashex depend on these.
+     */
+    if (pc == 0x10001c84u /* DoLoadCPanel */ ||
+        pc == 0x20004448u /* __DoLoadCPanel_veneer */) {
+        const uint32_t cpanel = 0x1006f230u;
+        uint32_t cpanel_len = mem_read32(0x10072bd0u);
+        uint32_t page_count = (cpanel_len + 255u) / 256u;
+        uint32_t page = mem_read8(USB_GUEST_PARAMETER_BUFFER);
+        if (page < page_count) {
+            uint32_t src = cpanel + page * 256u;
+            for (uint32_t i = 0; i < 256u; i++) {
+                mem_write8(USB_GUEST_DATA_BUFFER + i, mem_read8(src + i));
+            }
+            uint8_t st = mem_read8(USB_GUEST_REGISTERS);
+            mem_write8(USB_GUEST_REGISTERS, (uint8_t)(st & (uint8_t)~0x5Fu));
+        } else {
+            uint8_t st = mem_read8(USB_GUEST_REGISTERS);
+            mem_write8(USB_GUEST_REGISTERS,
+                       (uint8_t)((st & (uint8_t)~0x1Fu) | 0x40u | 0x08u));
+        }
+        mem_write8(USB_GUEST_DATA_XFER_MODE, 0);
+        mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
+        mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
+        mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
+        mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
+        static int loadcp_logged;
+        if (!loadcp_logged++) {
+            fprintf(stderr, "[A2Bus] DoLoadCPanel host-complete\n");
+            fflush(stderr);
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == 0x10001ed0u /* DoGetDeviceInfo */ ||
+        pc == 0x20004420u /* __DoGetDeviceInfo_veneer */) {
+        uint32_t i;
+        for (i = 0; i < 32u; i++) {
+            mem_write8(USB_GUEST_PARAMETER_BUFFER + i, 0);
+        }
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 0u, 0x88u); /* SIGNATURE1 */
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 1u, 0x74u); /* SIGNATURE2 */
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 2u, 0x01u); /* DeviceInfoVer */
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 3u, 35u);   /* FIRMWAREVER lo */
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 4u, 0u);
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 5u, 0x81u); /* BRD_PICO2W */
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 6u, 0u);
+        {
+            uint32_t units = usb_guest_flash_unit_total();
+            mem_write8(USB_GUEST_PARAMETER_BUFFER + 7u, (uint8_t)units);
+            mem_write8(USB_GUEST_PARAMETER_BUFFER + 8u, (uint8_t)units);
+        }
+        {
+            unsigned mb = (unsigned)(mem_read32(USB_GUEST_FLASH_SIZE0) +
+                                     mem_read32(USB_GUEST_FLASH_SIZE1));
+            if (mb == 0u) {
+                mb = 128u;
+            }
+            mem_write8(USB_GUEST_PARAMETER_BUFFER + 9u, (uint8_t)(mb & 0xffu));
+            mem_write8(USB_GUEST_PARAMETER_BUFFER + 10u, (uint8_t)((mb >> 8) & 0xffu));
+        }
+        mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
+        mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
+        mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
+        {
+            uint8_t st = mem_read8(USB_GUEST_REGISTERS);
+            mem_write8(USB_GUEST_REGISTERS, (uint8_t)(st & (uint8_t)~0x5Fu));
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
     if (pc == USB_GUEST_TS_READ_JEDECID) {
         cpu.r[0] = USB_GUEST_WINBOND_JEDEC24;
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;

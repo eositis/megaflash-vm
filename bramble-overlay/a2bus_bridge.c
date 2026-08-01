@@ -351,9 +351,49 @@ static int mf_native_mode(void)
     return id == 0x96u || id == 0x69u;
 }
 
+/*
+ * If DoCommand hangs, STATUS stays BUSY and BusLoop never services the Apple
+ * bus. Option 7's chkmegaflash then fails ("MegaFlash Not Found"); Ctrl-Reset
+ * chkmegaflashex sees BUSY stuck and skips MegaFlash boot entirely.
+ * Re-enter BusLoop (native) and clear BUSY/ERROR so detection and COLDSTART work.
+ */
+static void a2bus_unstick_busloop(const char *why)
+{
+    uint32_t c1pc = cores[CORE1].r[15] & ~1u;
+    uint8_t st = peek_reg(0);
+    fprintf(stderr,
+            "[A2Bus] unstick BusLoop (%s) core1PC=0x%08X status=0x%02X\n",
+            why, c1pc, st);
+    fflush(stderr);
+    poke_reg(0, (uint8_t)(st & (uint8_t)~(MF_BUSYFLAG | 0x5Fu)));
+    uint8_t id = peek_reg(3);
+    if (id != 0x96u && id != 0x69u) {
+        poke_reg(3, 0x96u);
+    }
+    /* Jump to BusLoop (not core1Main — that re-enters Slinky wait). */
+    memset(cores[CORE1].r, 0, sizeof(cores[CORE1].r));
+    cores[CORE1].r[13] = 0x20081000u;
+    cores[CORE1].r[15] = 0x20000260u; /* BusLoop */
+    cores[CORE1].xpsr = 0x01000000u;
+    cores[CORE1].current_irq = 0xFFFFFFFFu;
+    cores[CORE1].primask = 0;
+    cores[CORE1].is_halted = 0;
+    cores[CORE1].is_wfi = 0;
+}
+
 static int host_fast_read(uint8_t nibble, uint8_t *out)
 {
     nibble &= 0xFu;
+    /*
+     * ID must toggle even while BUSY: Apple chkmegaflash is only two ID reads.
+     * Real silicon also wouldn't advance BusLoop during DoCommand, but under
+     * emu a hung command would otherwise permanently look like "no MegaFlash".
+     */
+    if (nibble == 3u && mf_native_mode()) {
+        *out = peek_reg(3);
+        poke_reg(3, (uint8_t)(~(*out)));
+        return 1;
+    }
     if (!mf_native_mode() || (peek_reg(0) & MF_BUSYFLAG) != 0) {
         return 0;
     }
@@ -381,11 +421,6 @@ static int host_fast_read(uint8_t nibble, uint8_t *out)
         idx = (idx + 1u) & MF_PARAM_MASK;
         mem_write32(MF_PARAM_IDX, idx);
         poke_reg(1, mem_read8(MF_PARAM_BUF + (idx & MF_PARAM_MASK)));
-        return 1;
-    }
-    if (nibble == 3u) { /* ID toggle */
-        *out = peek_reg(3);
-        poke_reg(3, (uint8_t)(~(*out)));
         return 1;
     }
     return 0;
@@ -451,8 +486,11 @@ static void pump_guest(void)
         if ((s & MF_BUSYFLAG) != 0) {
             seen_busy = 1;
         } else if (seen_busy) {
-            break;
+            return;
         }
+    }
+    if (seen_busy && (peek_reg(0) & MF_BUSYFLAG) != 0) {
+        a2bus_unstick_busloop("CMD BUSY timeout");
     }
 }
 
@@ -490,6 +528,12 @@ static void handle_one(void)
             data = peek_reg(nibble);
             a2bus_inject_read(nibble & 0xFu);
             pump_guest();
+            data = peek_reg(nibble);
+            /* STATUS still BUSY after a full pump → DoCommand hung. */
+            if ((nibble & 0xFu) == 0u && (data & MF_BUSYFLAG) != 0) {
+                a2bus_unstick_busloop("STATUS read still BUSY");
+                data = peek_reg(0);
+            }
         }
         break;
     }
@@ -502,6 +546,10 @@ static void handle_one(void)
             return;
         }
         br.saw_bus_io = 1;
+        /* New CMD while already BUSY: previous DoCommand hung — recover first. */
+        if ((nibble & 0xFu) == 0u && (peek_reg(0) & MF_BUSYFLAG) != 0) {
+            a2bus_unstick_busloop("CMD while BUSY");
+        }
         if (!host_fast_write(nibble, wdata)) {
             a2bus_inject_write(nibble & 0xFu, wdata);
             pump_guest();
