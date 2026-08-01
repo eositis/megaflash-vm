@@ -347,10 +347,10 @@ echo "[mame] expect WRONG CHECKSUM warning for 3410445b.256 — MegaFlash ROM, n
 echo "[mame] pluginspath=$PLUGINPATH"
 # Do not exec: the EXIT trap must kill Bramble when MAME exits.
 set +e
-# cfg/: Open-Apple = Left Option or Left ⌘ (physical left solid-apple key).
+# scripts/mame_cfg: Open-Apple = Left Option or Left ⌘ (physical left solid-apple).
 "$MAME_BIN" apple2c4 \
   -rompath "$ROMPATH" \
-  -cfg_directory "$ROOT/cfg" \
+  -cfg_directory "$ROOT/scripts/mame_cfg" \
   -pluginspath "$PLUGINPATH" \
   -plugins \
   -plugin megaflash_bridge \
