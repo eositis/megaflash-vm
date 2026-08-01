@@ -63,7 +63,7 @@ When MAME exits, Bramble shuts down: the launcher no longer `exec`s MAME (so its
 
 **Real `cyw43_arch_init` is off by default under a2bus.** Concurrent InitPicoLed gSPI + BusLoopSlinky HardFaults core1 (`PC≈0x1FFF8F6C` during `clmload_status`), which freezes Slinky registers and makes MAME report MegaFlash not found / no boot. Default stubs: `cyw43_arch_init`, `cyw43_arch_gpio_put`, `InitCyw43`, `ConnectWifi`. Set `BRAMBLE_A2BUS_REAL_WIFI=1` only to exercise real gSPI (FEEDBEAD works; BusLoop still dies — WIP).
 
-**Host NAT / real internet:** Bramble supports `-tap <if>` and `-net` (TAP + IP forward + masquerade) on **Linux only**. macOS builds print `TAP interface only supported on Linux`. The MAME launcher does not pass `-tap`/`-net`. Until gSPI join works, Test Wifi is not a live host link.
+**Host NAT / real internet:** On **Linux**, `-tap` / `-net` use TAP + iptables/nft. On **macOS**, `-tap` opens a **utun** (Ethernet↔IPv4 in `tapif.c`); enable internet with `sudo scripts/macos-cyw43-pf-nat.sh enable` (see Bramble `docs/eositis/MACOS-WIFI.md`). The MAME launcher still does not pass `-tap` by default while a2bus stubs `cyw43_arch_init` (BusLoop WIP).
 
 Bring-up notes (a2bus):
 
