@@ -51,13 +51,9 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP (radio stub → host):** Bramble CYW43 accepts SSID/password and links to a virtual AP (`192.168.4.2/24`). Guest `cyw43_arch` still owns the control flow (ConnectWifi → NETPUMP → DNS/NTP). Under a2bus, wall-clock WFI races the guest 15s join deadline and guest UDP TX pbufs are unreliable, so the overlay:
+**Test Wifi / NTP (radio stub → host):** Bramble CYW43 accepts SSID/password and links to a virtual AP (`192.168.4.2/24`). Guest `cyw43_arch` still owns GetNetworkTime control flow (ConnectWifi → NETPUMP → DNS/NTP) with host DNS/SNTP stubs where guest UDP TX is unreliable.
 
-1. Completes `wifi_connect_timeout_ms` as a host stub JOIN + static lease (same IPs the in-chip DHCP would give).
-2. Resolves DNS on the host (`dns_gethostbyname`).
-3. Completes NTP via host SNTP (or local time fallback) into `CNTPTask`, so `GetNetworkTime` → `InitRTC` runs.
-
-`-wifi -tap` + pf NAT remains the path for real Ethernet through the host (`docs/eositis/MACOS-WIFI.md` in Bramble). Empty SSID still fails fast (`NETERR_SSIDNOTSET`).
+**CP Test Wifi is different:** firmware `DoTestWifi` runs on **core1** and waits on a multicore FIFO for core0 to run `TestWifi()` (up to 90s). That wait **freezes BusLoop**, so MAME locks on “Testing…”. Under a2bus the overlay **host-completes** `DoTestWifi` immediately (virtual IPs + host DNS probe) and never enters that IPC wait.
 
 Bring-up under a2bus:
 
@@ -66,6 +62,7 @@ Bring-up under a2bus:
 3. Guest timers track host wall time while a core is in WFI/WFE (so `sleep_until` during radio bring-up is not starved by BusLoop).
 4. Empty SSID still fails fast (`NETERR_SSIDNOTSET`) — C++ EH gap, not radio policy.
 5. `BRAMBLE_A2BUS_STUB_WIFI=1` — emergency stub of `cyw43_arch_init` only (WIP debt, not the product path).
+6. `wifi_connect_timeout_ms` host stub JOIN + static lease when core0 does run ConnectWifi (WFI wall-clock races the 15s guest deadline).
 
 On **macOS**, the launcher uses `sudo -A` with `scripts/macos-sudo-askpass.sh` so you get a **GUI admin dialog** once: enable pf NAT for `192.168.4.0/24`, then start Bramble as root for utun. Approve that dialog, wait for BusLoop ready, then MAME starts.
 
