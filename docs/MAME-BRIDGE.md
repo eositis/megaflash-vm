@@ -53,7 +53,7 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 **Test Wifi / NTP (radio stub → host):** Bramble CYW43 accepts SSID/password and links to a virtual AP (`192.168.4.2/24`). Guest `cyw43_arch` still owns GetNetworkTime control flow (ConnectWifi → NETPUMP → DNS/NTP) with host DNS/SNTP stubs where guest UDP TX is unreliable.
 
-**CP Test Wifi is different:** firmware `DoTestWifi` runs on **core1** and waits on a multicore FIFO for core0 to run `TestWifi()` (up to 90s). That wait **freezes BusLoop**, so MAME locks on “Testing…”. Under a2bus the overlay **host-completes** `DoTestWifi` immediately (virtual IPs + host DNS probe) and never enters that IPC wait.
+**CP Test Wifi is different:** firmware `DoTestWifi` runs on **core1** and waits on a multicore FIFO for core0 to run `TestWifi()` (up to 90s). That wait **freezes BusLoop**, so MAME locks on “Testing…”. Under a2bus the overlay **host-completes** `DoTestWifi` immediately (virtual IPs + host DNS + host SNTP → guest `rtcRunning` / calendar stubs) and never enters that IPC wait.
 
 Bring-up under a2bus:
 
@@ -130,7 +130,9 @@ Host-side DATA pointer advance must read `dataBufferTransferMode` as an **8-bit*
 
 Script PHI0 enables `IsAppleConnected`. BusLoop core1 is launched by a2bus hooks **after** `cyw43_arch_init` (and `.data` restore); early concurrent gSPI HardFaults BusLoop.
 
-Control-panel **Save** must not run real SPI security-register programming under a2bus (`EncryptWriteConfigToFlash` would leave STATUS BUSY and freeze on **Saving...**). Settings are applied in SRAM and mirrored to `flash/megaflash-user-config.bin`.
+Control-panel **Save** must not run real SPI security-register programming under a2bus (`EncryptWriteConfigToFlash` would leave STATUS BUSY and freeze on **Saving...**). Settings (including Wi‑Fi SSID/password) are applied in SRAM and the full 512-byte `configBuffer` is mirrored to `flash/megaflash-user-config.bin`, then reloaded on the next `LoadAllConfigs`.
+
+**Open-Apple device info:** Hold **Open-Apple** (MAME: usually Right ⌘ / Option — joystick button 0 / `$C061`) while the Control Panel starts. That calls `GetInfoString` → `GetDeviceInfoString`. Native `sprintf(%f)` hangs under Bramble, so a2bus fills the device-info text on the host.
 
 
 ## Smoke test

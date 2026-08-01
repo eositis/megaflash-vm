@@ -277,9 +277,137 @@ static int a2bus_host_dns_probe(const char *host) {
 }
 #endif
 
+/* Guest AON RTC: CP clock / ProDOS read calendar via aon_timer after InitRTC. */
+static int a2bus_rtc_valid;
+static time_t a2bus_rtc_base_local;
+static time_t a2bus_rtc_host_at_set;
+
+static const int32_t a2bus_tzhour[] = {
+    -12,-11,-10,-9,-9,-8,-7,-6,-5,-4,-3,-3,-2,-1,0,1,2,3,3,4,4,5,5,5,6,6,7,8,8,9,9,10,10,11,12,12,13,14
+};
+static const int32_t a2bus_tzmin[] = {
+    0,0,0,30,0,0,0,0,0,0,30,0,0,0,0,0,0,0,30,0,30,0,30,45,0,30,0,0,45,0,30,0,30,0,0,45,0,0
+};
+
+static int32_t a2bus_guest_tz_offset_sec(void) {
+    uint8_t id = mem_read8(USB_GUEST_CONFIG_BUFFER + 7u);
+    size_t n = sizeof(a2bus_tzhour) / sizeof(a2bus_tzhour[0]);
+    if ((size_t)id >= n) {
+        id = 14u;
+    }
+    int32_t hour = a2bus_tzhour[id];
+    int32_t min = a2bus_tzmin[id];
+    int32_t offset_min = hour * 60;
+    if (hour < 0) {
+        offset_min -= min;
+    } else {
+        offset_min += min;
+    }
+    return offset_min * 60;
+}
+
+static void a2bus_write_tm(uint32_t tm_ptr, const struct tm *t) {
+    mem_write32(tm_ptr + 0u,  (uint32_t)t->tm_sec);
+    mem_write32(tm_ptr + 4u,  (uint32_t)t->tm_min);
+    mem_write32(tm_ptr + 8u,  (uint32_t)t->tm_hour);
+    mem_write32(tm_ptr + 12u, (uint32_t)t->tm_mday);
+    mem_write32(tm_ptr + 16u, (uint32_t)t->tm_mon);
+    mem_write32(tm_ptr + 20u, (uint32_t)t->tm_year);
+    mem_write32(tm_ptr + 24u, (uint32_t)t->tm_wday);
+    mem_write32(tm_ptr + 28u, (uint32_t)t->tm_yday);
+    mem_write32(tm_ptr + 32u, (uint32_t)t->tm_isdst);
+}
+
+static void a2bus_apply_init_rtc(time_t utc_epoch, int32_t offset_sec) {
+    a2bus_rtc_base_local = utc_epoch + (time_t)offset_sec;
+    a2bus_rtc_host_at_set = time(NULL);
+    a2bus_rtc_valid = 1;
+    mem_write8(USB_GUEST_RTC_RUNNING_BSS, 1u);
+    {
+        struct tm *t = gmtime(&a2bus_rtc_base_local);
+        if (t) {
+            fprintf(stderr,
+                    "[A2Bus] InitRTC from NTP: utc=%ld offset=%ld → "
+                    "%04d-%02d-%02d %02d:%02d:%02d (rtcRunning=1)\n",
+                    (long)utc_epoch, (long)offset_sec,
+                    t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+                    t->tm_hour, t->tm_min, t->tm_sec);
+        }
+        fflush(stderr);
+    }
+}
+
+static time_t a2bus_rtc_now_local(void) {
+    if (!a2bus_rtc_valid) {
+        return time(NULL);
+    }
+    return a2bus_rtc_base_local + (time(NULL) - a2bus_rtc_host_at_set);
+}
+
+#if !defined(_WIN32)
+static int a2bus_host_ntp_query(time_t *epoch_out) {
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    struct addrinfo *rp;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo("pool.ntp.org", "123", &hints, &res) != 0) {
+        return -1;
+    }
+    uint8_t packet[48];
+    memset(packet, 0, sizeof(packet));
+    packet[0] = 0x1b;
+    int ok = -1;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
+        struct timeval tv;
+        tv.tv_sec = 3;
+        tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        if (sendto(fd, packet, sizeof(packet), 0, rp->ai_addr, rp->ai_addrlen) ==
+            (ssize_t)sizeof(packet)) {
+            uint8_t reply[48];
+            ssize_t n = recvfrom(fd, reply, sizeof(reply), 0, NULL, NULL);
+            if (n >= 48) {
+                uint32_t sec = ((uint32_t)reply[40] << 24) | ((uint32_t)reply[41] << 16) |
+                               ((uint32_t)reply[42] << 8) | (uint32_t)reply[43];
+                if (sec > 2208988800u) {
+                    *epoch_out = (time_t)(sec - 2208988800u);
+                    ok = 0;
+                }
+            }
+        }
+        close(fd);
+        if (ok == 0) {
+            break;
+        }
+    }
+    freeaddrinfo(res);
+    if (ok == 0) {
+        fprintf(stderr, "[A2Bus] host NTP ok (unix=%ld)\n", (long)*epoch_out);
+        fflush(stderr);
+    }
+    return ok;
+}
+
+static int a2bus_host_ntp_and_init_rtc(void) {
+    time_t epoch = 0;
+    if (a2bus_host_ntp_query(&epoch) != 0) {
+        epoch = time(NULL);
+        fprintf(stderr, "[A2Bus] host NTP fallback to local time\n");
+    }
+    a2bus_apply_init_rtc(epoch, a2bus_guest_tz_offset_sec());
+    return 0;
+}
+#endif
+
 /*
  * CP DoTestWifi runs on core1 and waits on core0 IPC (up to 90s) — that freezes
- * BusLoop / MAME. Complete it on the host: virtual lease + host DNS probe.
+ * BusLoop / MAME. Complete it on the host: virtual lease + host DNS/NTP.
  */
 static void a2bus_complete_dotestwifi_host(void) {
     uint8_t err = (uint8_t)USB_GUEST_NETERR_NONE;
@@ -304,14 +432,19 @@ static void a2bus_complete_dotestwifi_host(void) {
     if (a2bus_host_dns_probe("pool.ntp.org") != 0 &&
         a2bus_host_dns_probe("dns.google") != 0) {
         err = (uint8_t)USB_GUEST_NETERR_DNSFAILED;
+    } else if (a2bus_host_ntp_and_init_rtc() != 0) {
+        fprintf(stderr,
+                "[A2Bus] DoTestWifi: DNS ok but NTP failed — clock not updated\n");
+        fflush(stderr);
     }
 #endif
     a2bus_fill_testwifi_addrs(err);
     fprintf(stderr,
             "[A2Bus] DoTestWifi host-complete SSID='%s' → 192.168.4.2/24 err=%u "
-            "(%u=NONE %u=DNSFAILED)\n",
+            "(%u=NONE %u=DNSFAILED) rtc=%s\n",
             ssid, (unsigned)err, (unsigned)USB_GUEST_NETERR_NONE,
-            (unsigned)USB_GUEST_NETERR_DNSFAILED);
+            (unsigned)USB_GUEST_NETERR_DNSFAILED,
+            a2bus_rtc_valid ? "set" : "unset");
     fflush(stderr);
 }
 
@@ -925,14 +1058,43 @@ static int a2bus_spi_flash_hooks(void) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
-    /* Security-register SPI program hangs under a2bus; config kept in SRAM (+ host file). */
-    if (pc == USB_GUEST_ENCRYPT_WRITE_CFG ||
-        pc == USB_GUEST_TS_WRITE_SEC_REG) {
+    /* Security-register SPI program hangs under a2bus; mirror full configBuffer. */
+    if (pc == USB_GUEST_ENCRYPT_WRITE_CFG) {
+        usb_guest_persist_config_to_host();
+        mem_write8(USB_GUEST_SETTINGS_NOT_FLASH, 0u);
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == USB_GUEST_TS_WRITE_SEC_REG) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
     if (pc == USB_GUEST_TS_READ_SEC_REG) {
         /* Leave dest unchanged / zeros; callers validate magic. */
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    /* Open-Apple at CP entry → GetInfoString → sprintf(%f) hangs; fill on host. */
+    if (pc == 0x10005088u) { /* GetDeviceInfoString */
+        uint32_t dest = cpu.r[0];
+        if (dest == 0u) {
+            dest = USB_GUEST_DATA_BUFFER;
+        }
+        usb_guest_fill_device_info_string(dest);
+        fprintf(stderr, "[A2Bus] GetDeviceInfoString host-filled\n");
+        fflush(stderr);
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == USB_GUEST_AON_TIMER_GET_CAL) {
+        time_t now = a2bus_rtc_now_local();
+        struct tm *t = localtime(&now);
+        if (t) {
+            a2bus_write_tm(cpu.r[0], t);
+        }
+        if (!mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
+            mem_write8(USB_GUEST_RTC_RUNNING_BSS, 1u);
+        }
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
