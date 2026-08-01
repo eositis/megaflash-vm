@@ -1074,8 +1074,35 @@ static int a2bus_spi_flash_hooks(void) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
-    /* Open-Apple at CP entry → GetInfoString → sprintf(%f) hangs; fill on host. */
-    if (pc == 0x10005088u) { /* GetDeviceInfoString */
+    /*
+     * Open-Apple at CP entry → CMD_GETINFOSTR → GetDeviceInfoString.
+     * Native sprintf(%f) hangs under Bramble and leaves STATUS BUSY, so the
+     * next ID check / menu action reports MegaFlash missing. Host-complete
+     * the whole DoGetInfoString (and the leaf) so BusLoop stays idle.
+     */
+    if (pc == 0x10001e64u /* DoGetInfoString */ ||
+        pc == 0x20004690u /* __DoGetInfoString_veneer */) {
+        uint8_t type = mem_read8(USB_GUEST_PARAMETER_BUFFER);
+        if (type == 0u) { /* INFOSTR_DEVICE */
+            usb_guest_fill_device_info_string(USB_GUEST_DATA_BUFFER);
+            mem_write8(USB_GUEST_DATA_XFER_MODE, 0); /* MODE_LINEAR */
+            mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
+            mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
+            mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
+            mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
+            /* ClearError: drop ERRORFLAG + error code field; leave BUSY to DoCommand. */
+            uint8_t st = mem_read8(USB_GUEST_REGISTERS);
+            mem_write8(USB_GUEST_REGISTERS, (uint8_t)(st & (uint8_t)~0x5Fu));
+            fprintf(stderr, "[A2Bus] DoGetInfoString host-filled (Open-Apple device info)\n");
+            fflush(stderr);
+        } else {
+            uint8_t st = mem_read8(USB_GUEST_REGISTERS);
+            mem_write8(USB_GUEST_REGISTERS, (uint8_t)((st & (uint8_t)~0x1Fu) | 0x40u | 0x0Au));
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == USB_GUEST_GET_DEVICE_INFO) { /* GetDeviceInfoString leaf */
         uint32_t dest = cpu.r[0];
         if (dest == 0u) {
             dest = USB_GUEST_DATA_BUFFER;
