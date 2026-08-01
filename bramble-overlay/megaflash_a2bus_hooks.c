@@ -108,28 +108,41 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
     len = 0;
 }
 
-/* MegaFlash RTC normally starts via NTP; on a2bus seed from host clock. */
-static void a2bus_seed_megaflash_rtc(void) {
-    if (!a2bus_bridge_active()) {
-        return;
+/*
+ * Guest AON RTC: MegaFlash InitRTC(utc, tz) stores utc+tz then reads calendar from AON.
+ * Guest lwIP NTP is not runnable under a2bus (CYW43 boot stub); we SNTP on the host
+ * and apply the same InitRTC contract so DoGetTimeString / ProDOS see real wall time.
+ */
+static int a2bus_rtc_valid;
+static time_t a2bus_rtc_base_local;   /* InitRTC: secondsSince1970 + offset */
+static time_t a2bus_rtc_host_at_set;  /* host time() when base was set */
+
+/* Matches MegaFlash common/defines.h TZHOUR / TZMIN / DEFAULTTIMEZONE. */
+static const int32_t a2bus_tzhour[] = {
+    -12,-11,-10,-9,-9,-8,-7,-6,-5,-4,-3,-3,-2,-1,0,1,2,3,3,4,4,5,5,5,6,6,7,8,8,9,9,10,10,11,12,12,13,14
+};
+static const int32_t a2bus_tzmin[] = {
+    0,0,0,30,0,0,0,0,0,0,30,0,0,0,0,0,0,0,30,0,30,0,30,45,0,30,0,0,45,0,30,0,30,0,0,45,0,0
+};
+
+static int32_t a2bus_guest_tz_offset_sec(void) {
+    uint8_t id = mem_read8(USB_GUEST_CONFIG_BUFFER + 7u);
+    size_t n = sizeof(a2bus_tzhour) / sizeof(a2bus_tzhour[0]);
+    if ((size_t)id >= n) {
+        id = 14u; /* DEFAULTTIMEZONE UTC+0 */
     }
-    /* Re-apply after crt0 BSS zero; skip if firmware already started RTC. */
-    if (mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
-        return;
+    int32_t hour = a2bus_tzhour[id];
+    int32_t min = a2bus_tzmin[id];
+    int32_t offset_min = hour * 60;
+    if (hour < 0) {
+        offset_min -= min;
+    } else {
+        offset_min += min;
     }
-    mem_write8(USB_GUEST_RTC_RUNNING_BSS, 1u);
-    fprintf(stderr, "[A2Bus] MegaFlash RTC seeded from host (rtcRunning=1)\n");
+    return offset_min * 60;
 }
 
-static void usb_guest_stub_aon_timer_get_time_calendar(void) {
-    uint32_t tm_ptr = cpu.r[0];
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    if (!t) {
-        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-        return;
-    }
-    /* newlib struct tm: 9x int fields. */
+static void a2bus_write_tm(uint32_t tm_ptr, const struct tm *t) {
     mem_write32(tm_ptr + 0u,  (uint32_t)t->tm_sec);
     mem_write32(tm_ptr + 4u,  (uint32_t)t->tm_min);
     mem_write32(tm_ptr + 8u,  (uint32_t)t->tm_hour);
@@ -139,6 +152,47 @@ static void usb_guest_stub_aon_timer_get_time_calendar(void) {
     mem_write32(tm_ptr + 24u, (uint32_t)t->tm_wday);
     mem_write32(tm_ptr + 28u, (uint32_t)t->tm_yday);
     mem_write32(tm_ptr + 32u, (uint32_t)t->tm_isdst);
+}
+
+/* Same contract as MegaFlash InitRTC(): start AON at utc+offset, rtcRunning=1. */
+static void a2bus_apply_init_rtc(time_t utc_epoch, int32_t offset_sec) {
+    a2bus_rtc_base_local = utc_epoch + (time_t)offset_sec;
+    a2bus_rtc_host_at_set = time(NULL);
+    a2bus_rtc_valid = 1;
+    mem_write8(USB_GUEST_RTC_RUNNING_BSS, 1u);
+    {
+        struct tm *t = gmtime(&a2bus_rtc_base_local);
+        if (t) {
+            fprintf(stderr,
+                    "[A2Bus] InitRTC from NTP: utc=%ld offset=%ld → "
+                    "%04d-%02d-%02d %02d:%02d:%02d (rtcRunning=1)\n",
+                    (long)utc_epoch, (long)offset_sec,
+                    t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+                    t->tm_hour, t->tm_min, t->tm_sec);
+        } else {
+            fprintf(stderr, "[A2Bus] InitRTC from NTP: utc=%ld offset=%ld\n",
+                    (long)utc_epoch, (long)offset_sec);
+        }
+        fflush(stderr);
+    }
+}
+
+static time_t a2bus_rtc_now_local(void) {
+    if (!a2bus_rtc_valid) {
+        return time(NULL);
+    }
+    return a2bus_rtc_base_local + (time(NULL) - a2bus_rtc_host_at_set);
+}
+
+static void usb_guest_stub_aon_timer_get_time_calendar(void) {
+    uint32_t tm_ptr = cpu.r[0];
+    time_t now = a2bus_rtc_now_local();
+    struct tm *t = gmtime(&now);
+    if (!t) {
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return;
+    }
+    a2bus_write_tm(tm_ptr, t);
     cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
 }
 
@@ -147,8 +201,55 @@ static int a2bus_rtc_hooks(void) {
         return 0;
     }
     uint32_t pc = cpu.r[15] & ~1u;
+    /* aon_timer_start(timespec*): firmware InitRTC path. */
+    if (pc == 0x10011804u) {
+        uint32_t ts = cpu.r[0];
+        if (ts != 0u) {
+            time_t sec = (time_t)(int32_t)mem_read32(ts);
+            a2bus_rtc_base_local = sec;
+            a2bus_rtc_host_at_set = time(NULL);
+            a2bus_rtc_valid = 1;
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == 0x10011838u) { /* aon_timer_start_calendar(tm*) */
+        uint32_t tmp = cpu.r[0];
+        if (tmp != 0u) {
+            struct tm t;
+            memset(&t, 0, sizeof(t));
+            t.tm_sec = (int)mem_read32(tmp + 0u);
+            t.tm_min = (int)mem_read32(tmp + 4u);
+            t.tm_hour = (int)mem_read32(tmp + 8u);
+            t.tm_mday = (int)mem_read32(tmp + 12u);
+            t.tm_mon = (int)mem_read32(tmp + 16u);
+            t.tm_year = (int)mem_read32(tmp + 20u);
+            t.tm_isdst = -1;
+            time_t sec = timegm(&t);
+            if (sec != (time_t)-1) {
+                a2bus_rtc_base_local = sec;
+                a2bus_rtc_host_at_set = time(NULL);
+                a2bus_rtc_valid = 1;
+            }
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == 0x100117dau) { /* aon_timer_get_time(timespec*) */
+        uint32_t ts = cpu.r[0];
+        if (ts != 0u) {
+            mem_write32(ts, (uint32_t)a2bus_rtc_now_local());
+            mem_write32(ts + 4u, 0u);
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
     if (pc == USB_GUEST_AON_TIMER_GET_CAL) {
-        a2bus_seed_megaflash_rtc();
+        if (!a2bus_rtc_valid && !mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
+            /* No NTP yet — leave calendar unset; DoGetTimeString shows blanks. */
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
         usb_guest_stub_aon_timer_get_time_calendar();
         return 1;
     }
@@ -219,7 +320,7 @@ static void a2bus_ensure_malloc_mutex(void) {
  * the CP prints a corrupt/empty dataBuffer (zero flood).
  *
  * Diagnostics: keep boot stubs; complete DoTestWifi / GetNetworkTime with guest
- * virtual IPs (192.168.4.2/24) plus real host DNS/NTP probes (Mac's network / NAT).
+ * virtual IPs (192.168.4.2/24) plus real host DNS + SNTP; apply NTP via InitRTC.
  *
  * BRAMBLE_A2BUS_REAL_WIFI=1 — never stub (debug only; BusLoop/TestWifi may die)
  */
@@ -363,18 +464,35 @@ static int a2bus_host_ntp_query(time_t *epoch_out) {
     return ok;
 }
 
+static int a2bus_host_ntp_and_init_rtc(void) {
+    time_t epoch = 0;
+    if (a2bus_host_ntp_query(&epoch) != 0) {
+        return -1;
+    }
+    a2bus_apply_init_rtc(epoch, a2bus_guest_tz_offset_sec());
+    return 0;
+}
+
 static void a2bus_complete_testwifi_diag(void) {
     uint8_t err = USB_GUEST_NETERR_NONE;
     if (a2bus_host_dns_probe("pool.ntp.org") != 0 &&
         a2bus_host_dns_probe("dns.google") != 0) {
         err = USB_GUEST_NETERR_DNSFAILED;
+    } else {
+        /* DNS ok → WIFI OK; still SNTP so CP clock / ProDOS get real time. */
+        if (a2bus_host_ntp_and_init_rtc() != 0) {
+            fprintf(stderr,
+                    "[A2Bus] DoTestWifi: DNS ok but NTP failed — clock not updated\n");
+            fflush(stderr);
+        }
     }
     a2bus_fill_testwifi_addrs(err);
     fprintf(stderr,
             "[A2Bus] DoTestWifi: SSID set → IP 192.168.4.2/24 err=%u "
-            "(%u=NONE %u=DNSFAILED)\n",
+            "(%u=NONE %u=DNSFAILED) rtc=%s\n",
             (unsigned)err, (unsigned)USB_GUEST_NETERR_NONE,
-            (unsigned)USB_GUEST_NETERR_DNSFAILED);
+            (unsigned)USB_GUEST_NETERR_DNSFAILED,
+            a2bus_rtc_valid ? "set" : "unset");
     fflush(stderr);
 }
 
@@ -482,15 +600,12 @@ static int a2bus_wifi_hooks(void) {
             cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
             return 1;
         }
-        time_t epoch = 0;
-        if (a2bus_host_ntp_query(&epoch) != 0) {
+        if (a2bus_host_ntp_and_init_rtc() != 0) {
             cpu.r[0] = USB_GUEST_NETERR_NTPFAILED;
             cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
             return 1;
         }
-        (void)epoch;
-        mem_write8(USB_GUEST_RTC_RUNNING_BSS, 1u);
-        fprintf(stderr, "[A2Bus] GetNetworkTime: host NTP OK → rtcRunning=1\n");
+        fprintf(stderr, "[A2Bus] GetNetworkTime: host NTP applied to guest RTC\n");
         fflush(stderr);
         cpu.r[0] = USB_GUEST_NETERR_NONE;
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
@@ -728,6 +843,24 @@ static int a2bus_spi_flash_hooks(void) {
      * With Bramble -wifi, MegaFlash must see Pico W so core0 enters core0Loop
      * (NTP / TestWifi IPC / cyw43_arch_poll). Force when CYW43 emulation is on.
      */
+    /* MAME bridge ⇒ Apple is present; needed so main enters core0Loop (NTP). */
+    if (pc == USB_GUEST_IS_APPLE_CONNECTED_FN ||
+        pc == USB_GUEST_IS_APPLE_CONNECTED_CALL ||
+        pc == USB_GUEST_IS_APPLE_CONNECTED_CALL2) {
+        static int apple_logged;
+        if (!apple_logged++) {
+            fprintf(stderr, "[A2Bus] IsAppleConnected forced true (a2bus-bridge)\n");
+        }
+        cpu.r[0] = 1u;
+        if (pc == USB_GUEST_IS_APPLE_CONNECTED_FN) {
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        } else if (pc == USB_GUEST_IS_APPLE_CONNECTED_CALL) {
+            cpu.r[15] = 0x1000033cu | 1u; /* next insn after bl */
+        } else {
+            cpu.r[15] = 0x1000040cu | 1u;
+        }
+        return 1;
+    }
     if (cyw43.enabled && pc == USB_GUEST_CHECK_PICOW_FN) {
         static int picow_logged;
         if (!picow_logged++) {

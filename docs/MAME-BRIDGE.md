@@ -51,7 +51,12 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP:** Boot still stubs `cyw43_arch_init` (required for BusLoop). Guest firmware TestWifi that re-inits CYW43 cannot finish under a2bus (accelerated `sleep_ms` burns the 90s timeout during CLM load → timeout + corrupt IP display). Instead, with a configured SSID, the overlay completes Test Wifi with guest virtual IPs `192.168.4.2/24` and a **real host DNS** probe (`pool.ntp.org` / `dns.google`); `GetNetworkTime` uses a **real host NTP** query then sets `rtcRunning`. Empty SSID still fails fast with `NETERR_SSIDNOTSET`. Launcher still passes `-wifi -tap` + macOS admin dialog for utun/pf. Opt out: `NO_WIFI=1`, `NO_HOST_NET=1`, or `BRAMBLE_A2BUS_REAL_WIFI=1` (debug only).
+**Test Wifi / NTP:** Boot still stubs `cyw43_arch_init` (required for BusLoop). Guest lwIP NTP over CYW43 is **not** used under a2bus (same timeout/hang issue). Instead the overlay:
+1. Completes Test Wifi with guest IPs `192.168.4.2/24` plus a **real host DNS** probe.
+2. Sends a **real host SNTP** query to `pool.ntp.org:123`, then applies MegaFlash’s `InitRTC(utc, tz)` contract (guest `rtcRunning` + AON calendar stubs) so the CP clock / ProDOS timestamps advance from that NTP response.
+3. Intercepts `GetNetworkTime` the same way (and forces `IsAppleConnected` so `core0Loop` can call it).
+
+Empty SSID still fails fast with `NETERR_SSIDNOTSET`. Look for log lines `[A2Bus] host NTP ok` and `[A2Bus] InitRTC from NTP:`. Launcher still passes `-wifi -tap` + macOS admin dialog for utun/pf.
 
 On **macOS**, the launcher uses `sudo -A` with `scripts/macos-sudo-askpass.sh` so you get a **GUI admin dialog** once: enable pf NAT for `192.168.4.0/24`, then start Bramble as root for utun. Approve that dialog, wait for BusLoop ready, then MAME starts.
 
