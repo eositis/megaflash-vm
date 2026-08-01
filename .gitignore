@@ -26,6 +26,7 @@ snap/
 inp/
 diff/
 hi/
+.run/
 
 # Editor / OS
 .DS_Store

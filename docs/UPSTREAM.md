@@ -14,7 +14,7 @@ When proposing Bramble improvements to Night-Traders / upstream, **do not includ
 
 - `bramble-overlay/` (`a2bus*`, bridge, MegaFlash PC stubs)
 - MAME plugin / launcher / stubs
-- Temporary wifi/RTC a2bus stubs (until CYW43 ↔ macOS network)
+- Temporary empty-SSID / optional `BRAMBLE_A2BUS_STUB_WIFI` hooks (real TestWifi/NTP via hostif by default)
 - MegaFlash firmware, `iic.bin`, SPI volume images
 
 Stock `../Bramble` builds without Apple code. The MAME path uses this repo’s overlay binary.

@@ -51,9 +51,11 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP** under a2bus are synthetic by default (real gSPI JOIN still WIP). The launcher passes `-wifi` by default (`NO_WIFI=1` to disable).
+**Test Wifi / NTP** use the real Pico SDK / CYW43 path (JOIN, DHCP, DNS, NTP) when `-wifi` is on. The launcher passes `-wifi -tap` by default so guest traffic goes through macOS **utun** + **pf NAT** (or Linux TAP). Empty SSID still fails fast with `NETERR_SSIDNOTSET` (C++ exception paths hang under Bramble EH). Opt out: `NO_WIFI=1`, `NO_HOST_NET=1` (`-wifi` without tap), or `BRAMBLE_A2BUS_STUB_WIFI=1` (stub `cyw43_arch_init` only — no fake “OK” results).
 
-With an **empty SSID**, a2bus fails fast with `NETERR_SSIDNOTSET` (3) so the control panel does not hang: empty-SSID paths throw C++ exceptions that Bramble’s EH still cannot unwind. With a **configured SSID**, a2bus completes Test Wifi with synthetic `NETERR_NONE` and display strings `192.168.4.2` / `255.255.255.0` / `192.168.4.1` / `192.168.4.1`. When **NTP** is enabled in settings (`NTPCLIENTFLAG`), `GetNetworkTime` seeds MegaFlash `rtcRunning` from the host clock and `aon_timer_get_time_calendar` returns host local time — so the CP clock and ProDOS timestamps advance without a live NTP server. Optional `BRAMBLE_A2BUS_SEED_WIFI=1` seeds `BrambleNet`/`password` for bring-up without Save Settings.
+On **macOS**, the launcher uses `sudo -A` with `scripts/macos-sudo-askpass.sh` so you get a **GUI admin dialog** once: enable pf NAT for `192.168.4.0/24`, then start Bramble as root for utun. Approve that dialog, wait for BusLoop ready, then MAME starts.
+
+Optional `BRAMBLE_A2BUS_SEED_WIFI=1` seeds `BrambleNet`/`password` for bring-up without Save Settings.
 
 **Control-Reset:** Thumb-2 `TBH` in newlib `_svfprintf_r` must not be decoded as `LDRD` (bit6 collision); that HardFault locked core1 and tripped MAME-session shutdown.
 
@@ -61,16 +63,14 @@ Firmware `[u2macraw]` telemetry from `U2_Net_Poll` is suppressed on a2bus stderr
 
 When MAME exits, Bramble shuts down: the launcher no longer `exec`s MAME (so its EXIT trap can kill Bramble), and the bridge also requests exit after a client that issued READ/WRITE disconnects (preflight PING/PEEK alone does not).
 
-**Real `cyw43_arch_init` is off by default under a2bus.** Concurrent InitPicoLed gSPI + BusLoopSlinky HardFaults core1 (`PC≈0x1FFF8F6C` during `clmload_status`), which freezes Slinky registers and makes MAME report MegaFlash not found / no boot. Default stubs: `cyw43_arch_init`, `cyw43_arch_gpio_put`, `InitCyw43`, `ConnectWifi`. Set `BRAMBLE_A2BUS_REAL_WIFI=1` only to exercise real gSPI (FEEDBEAD works; BusLoop still dies — WIP).
-
-**Host NAT / real internet:** On **Linux**, `-tap` / `-net` use TAP + iptables/nft. On **macOS**, `-tap` opens a **utun** (Ethernet↔IPv4 in `tapif.c`); enable internet with `sudo scripts/macos-cyw43-pf-nat.sh enable` (see Bramble `docs/eositis/MACOS-WIFI.md`). The MAME launcher still does not pass `-tap` by default while a2bus stubs `cyw43_arch_init` (BusLoop WIP).
+**Host NAT / real internet:** See Bramble `docs/eositis/MACOS-WIFI.md`. Launcher helper: `scripts/macos-host-net-prep.sh` → Bramble `macos-cyw43-pf-nat.sh`. Note: concurrent real `cyw43_arch_init` + BusLoop was previously observed to HardFault core1 during CLM load — if boot dies after enabling host net, set `BRAMBLE_A2BUS_STUB_WIFI=1` temporarily and report.
 
 Bring-up notes (a2bus):
 
-- Skip `stdio_usb_init` so core0 reaches `InitPicoLed`; stub `cyw43_arch_init` unless `BRAMBLE_A2BUS_REAL_WIFI=1`.
+- Skip `stdio_usb_init` so core0 reaches `InitPicoLed` / real `cyw43_arch_init` (unless `BRAMBLE_A2BUS_STUB_WIFI=1`).
 - Host-format `__wrap_printf`, stub `hw_claim_*` / `check_alloc`, skip firmware `multicore_launch` when the script already started core1.
 - Force `CheckPicoW()==true` when `-wifi` is on.
-- Optional `-tap` / `-net` (via script `"$@"`) for a real host network once join works.
+- Default `-tap` / pf (macOS) so Test Wifi DNS/NTP are real diagnostics.
 
 `CMD_COLDSTART` must finish before the Apple reads `configbyte1`. The bridge pump waits for a full STATUS **BUSY→idle** cycle (no early exit if BUSY was never seen). A premature return left `configbyte1=0`, which clears `AUTOBOOTFLAG` and makes the IIc firmware skip slot 4 (`NEXTBOOTSLOT=$C6`).
 
@@ -91,7 +91,9 @@ Bring-up notes (a2bus):
 | `BRAMBLE_IIC_BIN` | set by launcher to `IIC_BIN` | Optional Lua re-overlay path |
 | `MAME` | `mame` | Emulator binary |
 | `TIMEOUT` | unset (none) | Bramble `-timeout` seconds |
-| `BRAMBLE_A2BUS_REAL_WIFI` | unset | `1` = real `cyw43_arch_init` (breaks BusLoop until fixed) |
+| `NO_WIFI` | unset | `1` = do not pass `-wifi` |
+| `NO_HOST_NET` | unset | `1` = `-wifi` without `-tap` / pf |
+| `BRAMBLE_A2BUS_STUB_WIFI` | unset | `1` = stub `cyw43_arch_init` (BusLoop bring-up; no fake TestWifi OK) |
 | `BRAMBLE_A2BUS_SEED_WIFI` | unset | `1` = seed BrambleNet SSID/password in config |
 | `BRAMBLE_A2BUS_U2MACRAW` | unset | `1` = print firmware `[u2macraw]` poll telemetry |
 

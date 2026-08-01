@@ -139,11 +139,29 @@ if [[ -f "$ELF" ]]; then
 fi
 
 BRAMBLE_PID=""
-cleanup() {
-  if [[ -n "$BRAMBLE_PID" ]] && kill -0 "$BRAMBLE_PID" 2>/dev/null; then
-    kill "$BRAMBLE_PID" 2>/dev/null || true
-    wait "$BRAMBLE_PID" 2>/dev/null || true
+BRAMBLE_ELEVATED=0
+ASKPASS="$ROOT/scripts/macos-sudo-askpass.sh"
+HOST_NET_PREP="$ROOT/scripts/macos-host-net-prep.sh"
+
+# Kill may need sudo when Bramble was started elevated for utun.
+kill_bramble() {
+  local pid="$1"
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    return 0
   fi
+  if kill "$pid" 2>/dev/null; then
+    wait "$pid" 2>/dev/null || true
+    return 0
+  fi
+  if [[ "$BRAMBLE_ELEVATED" -eq 1 ]] && [[ -x "$ASKPASS" ]]; then
+    SUDO_ASKPASS="$ASKPASS" sudo -A kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  kill_bramble "$BRAMBLE_PID"
+  BRAMBLE_PID=""
 }
 trap cleanup EXIT INT TERM
 
@@ -168,32 +186,91 @@ PY
   fi
 fi
 
-# MegaFlash Test Wifi / NTP use Pico SDK cyw43_arch against Bramble's CYW43
-# emulation (fake AP + DHCP without TAP). Pass NO_WIFI=1 to disable.
+# MegaFlash Test Wifi / NTP use real CYW43 + hostif (-wifi -tap) so DNS/time
+# diagnostics hit the network. Pass NO_WIFI=1 to disable radio; NO_HOST_NET=1
+# for -wifi only (no utun/pf); BRAMBLE_A2BUS_STUB_WIFI=1 to stub cyw43_arch_init.
 WIFI_ARGS=()
+HOST_NET=0
 if [[ -z "${NO_WIFI:-}" ]]; then
   WIFI_ARGS+=(-wifi)
+  if [[ -z "${NO_HOST_NET:-}" ]]; then
+    WIFI_ARGS+=(-tap "${BRAMBLE_TAP_NAME:-bramble0}")
+    HOST_NET=1
+  fi
 fi
+
+run_bramble() {
+  # cwd = this repo so relative flash/megaflash-user-config.bin resolves here.
+  (
+    cd "$ROOT"
+    exec env BRAMBLE_ESCALATED="${BRAMBLE_ESCALATED:-}" \
+      "$BRAMBLE" "$UF2" \
+      -arch m33 \
+      -clock 150 \
+      -cores 2 \
+      -a2bus-bridge "$PORT" \
+      -script "$STUB" \
+      "${SPI_FLASH_ARGS[@]}" \
+      "${WIFI_ARGS[@]}" \
+      ${TIMEOUT:+-timeout "$TIMEOUT"} \
+      "${REGS_ARGS[@]}" \
+      "$@"
+  )
+}
 
 echo "[mame] Bramble=$BRAMBLE  stub=$STUB  port=$PORT"
 echo "[mame] flash1=$SPI_FLASH1"
+if [[ "$HOST_NET" -eq 1 ]]; then
+  echo "[mame] host network: -wifi -tap (utun + pf NAT for 192.168.4.0/24)"
+fi
 echo "[mame] starting Bramble MegaFlash bridge on 127.0.0.1:$PORT"
-# cwd = this repo so relative flash/megaflash-user-config.bin resolves here.
-(
-  cd "$ROOT"
-  "$BRAMBLE" "$UF2" \
-    -arch m33 \
-    -clock 150 \
-    -cores 2 \
-    -a2bus-bridge "$PORT" \
-    -script "$STUB" \
-    "${SPI_FLASH_ARGS[@]}" \
-    "${WIFI_ARGS[@]}" \
-    ${TIMEOUT:+-timeout "$TIMEOUT"} \
-    "${REGS_ARGS[@]}" \
-    "$@"
-) &
-BRAMBLE_PID=$!
+
+if [[ "$HOST_NET" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
+  if [[ ! -f "$ASKPASS" ]]; then
+    echo "askpass helper missing: $ASKPASS" >&2
+    exit 1
+  fi
+  chmod +x "$ASKPASS" "$HOST_NET_PREP" 2>/dev/null || true
+  export SUDO_ASKPASS="$ASKPASS"
+  export SUDO_ASKPASS_PROMPT="MegaFlash needs administrator access to create a utun interface and enable pf NAT so guest Wi‑Fi (192.168.4.0/24) can reach DNS/NTP on the internet."
+  RUN_DIR="$ROOT/.run"
+  mkdir -p "$RUN_DIR"
+  RUNNER="$RUN_DIR/start-bramble-hostnet.sh"
+  {
+    echo '#!/usr/bin/env bash'
+    echo 'set -euo pipefail'
+    echo "export BRAMBLE_ESCALATED=1"
+    echo "export BRAMBLE_ROOT=$(printf '%q' "$BRAMBLE_ROOT")"
+    echo "export PATH=$(printf '%q' "$PATH")"
+    echo "$(printf '%q' "$HOST_NET_PREP") enable || true"
+    echo "cd $(printf '%q' "$ROOT")"
+    printf 'exec'
+    printf ' %q' "$BRAMBLE" "$UF2" \
+      -arch m33 -clock 150 -cores 2 \
+      -a2bus-bridge "$PORT" \
+      -script "$STUB"
+    if ((${#SPI_FLASH_ARGS[@]})); then printf ' %q' "${SPI_FLASH_ARGS[@]}"; fi
+    if ((${#WIFI_ARGS[@]})); then printf ' %q' "${WIFI_ARGS[@]}"; fi
+    if [[ -n "${TIMEOUT:-}" ]]; then printf ' %q' -timeout "$TIMEOUT"; fi
+    if ((${#REGS_ARGS[@]})); then printf ' %q' "${REGS_ARGS[@]}"; fi
+    if (($#)); then printf ' %q' "$@"; fi
+    echo
+  } >"$RUNNER"
+  chmod +x "$RUNNER"
+  echo "[mame] requesting macOS admin approval for utun + pf NAT (dialog)…"
+  # One elevated process: pf enable then Bramble as root (BRAMBLE_ESCALATED skips re-exec).
+  sudo -A -E "$RUNNER" &
+  BRAMBLE_PID=$!
+  BRAMBLE_ELEVATED=1
+elif [[ "$HOST_NET" -eq 1 ]]; then
+  # Linux: Bramble sudo-reexeces for TAP; iptables/nft is separate.
+  echo "[mame] host network: Bramble may prompt for sudo to create TAP"
+  run_bramble "$@" &
+  BRAMBLE_PID=$!
+else
+  run_bramble "$@" &
+  BRAMBLE_PID=$!
+fi
 
 python3 - "$PORT" <<'PY'
 import socket, sys, time

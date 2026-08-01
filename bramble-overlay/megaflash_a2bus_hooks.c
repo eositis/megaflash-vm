@@ -114,8 +114,6 @@ static void a2bus_seed_megaflash_rtc(void) {
     fprintf(stderr, "[A2Bus] MegaFlash RTC seeded from host (rtcRunning=1)\n");
 }
 
-#define USB_GUEST_NTPCLIENTFLAG 0x10u /* configbyte1 — matches MegaFlash defines.h */
-
 static void usb_guest_stub_aon_timer_get_time_calendar(void) {
     uint32_t tm_ptr = cpu.r[0];
     time_t now = time(NULL);
@@ -160,7 +158,6 @@ static int a2bus_rtc_hooks(void) {
 #define USB_GUEST_CYW43_ARCH_INIT     0x1001b030u /* cyw43_arch_init (InitPicoLed) */
 #define USB_GUEST_CYW43_GPIO_PUT      0x1001afa0u /* cyw43_arch_gpio_put */
 #define USB_GUEST_NETERR_SSIDNOTSET   3u
-#define USB_GUEST_NETERR_NONE         11u /* NetworkError_t: last enumerator */
 #define USB_GUEST_DATA_XFER_MODE      0x2006160au /* dataBufferTransferMode */
 #define USB_GUEST_DATA_BUFFER_INDEX   0x2000ccccu
 #define USB_GUEST_MALLOC_MUTEX        0x20005164u /* malloc_mutex (.data, often still zero) */
@@ -208,54 +205,22 @@ static void a2bus_ensure_malloc_mutex(void) {
     fprintf(stderr, "[A2Bus] malloc_mutex unlocked (owner=-1)\n");
 }
 
-static void a2bus_write_cstr(uint32_t *dest, const char *s) {
-    while (*s) {
-        mem_write8((*dest)++, (uint8_t)*s++);
-    }
-    mem_write8((*dest)++, 0);
-}
-
-/* Finish DoTestWifi like firmware for CP PrintStringFromDataBuffer. */
-static void a2bus_complete_testwifi_ok(void) {
-    mem_write8(USB_GUEST_PARAMETER_BUFFER, (uint8_t)USB_GUEST_NETERR_NONE);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 1u, 192);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 2u, 168);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 3u, 4);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 4u, 2);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 5u, 255);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 6u, 255);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 7u, 255);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 8u, 0);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 9u, 192);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 10u, 168);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 11u, 4);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 12u, 1);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 13u, 192);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 14u, 168);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 15u, 4);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 16u, 1);
-
-    uint32_t d = USB_GUEST_DATA_BUFFER;
-    a2bus_write_cstr(&d, "192.168.4.2");
-    a2bus_write_cstr(&d, "255.255.255.0");
-    a2bus_write_cstr(&d, "192.168.4.1");
-    a2bus_write_cstr(&d, "192.168.4.1");
-
-    mem_write8(USB_GUEST_DATA_XFER_MODE, 0);
-    mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
-    mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
-    mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
-    mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
-}
-
-/* Real gSPI during a2bus kills BusLoop (core1 HardFault @ clmload_status). */
-static int a2bus_real_wifi(void) {
+/*
+ * Opt into BusLoop-safe cyw43 stubs (no real JOIN / DNS / NTP). Default is real
+ * CYW43 so MegaFlash Test Wifi / GetNetworkTime use hostif when -wifi [-tap].
+ * Empty-SSID still fails fast: those paths throw C++ exceptions Bramble cannot unwind.
+ */
+static int a2bus_stub_wifi(void) {
     static int cached = -1;
     if (cached < 0) {
-        const char *e = getenv("BRAMBLE_A2BUS_REAL_WIFI");
+        const char *e = getenv("BRAMBLE_A2BUS_STUB_WIFI");
         cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
         if (cached) {
-            fprintf(stderr, "[A2Bus] BRAMBLE_A2BUS_REAL_WIFI=1 — real cyw43_arch_init\n");
+            fprintf(stderr,
+                    "[A2Bus] BRAMBLE_A2BUS_STUB_WIFI=1 — stub cyw43_arch_init "
+                    "(no synthetic TestWifi/NTP results)\n");
+        } else {
+            fprintf(stderr, "[A2Bus] real CYW43 path (DNS/NTP via hostif when -tap)\n");
         }
     }
     return cached;
@@ -263,10 +228,9 @@ static int a2bus_real_wifi(void) {
 
 /*
  * Empty-SSID TestWifi/NTP uses C++ exceptions (__cxa_throw). Fail fast SSIDNOTSET.
- *
- * Default a2bus: stub cyw43_arch_init / InitCyw43 / ConnectWifi so BusLoop stays
- * alive (native ID $96, boot, option 7). Set BRAMBLE_A2BUS_REAL_WIFI=1 to exercise
- * real gSPI (FEEDBEAD works; core1 Slinky still HardFaults — WIP).
+ * Configured SSID: fall through to firmware + Bramble CYW43 (real diagnostics).
+ * BRAMBLE_A2BUS_STUB_WIFI=1: stub only cyw43_arch_init / LED / InitCyw43 / ConnectWifi
+ * so BusLoop can survive without host net (TestWifi then fails in firmware, not fake OK).
  */
 static int a2bus_wifi_hooks(void) {
     if (!a2bus_bridge_active() || !cyw43.enabled) {
@@ -304,13 +268,11 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
-    if (!a2bus_real_wifi()) {
+    if (a2bus_stub_wifi()) {
         if (pc == USB_GUEST_CYW43_ARCH_INIT) {
             static int once;
             if (!once++) {
-                fprintf(stderr,
-                        "[A2Bus] stub cyw43_arch_init (BusLoop-safe; "
-                        "BRAMBLE_A2BUS_REAL_WIFI=1 for real gSPI)\n");
+                fprintf(stderr, "[A2Bus] stub cyw43_arch_init (BRAMBLE_A2BUS_STUB_WIFI=1)\n");
             }
             mem_write8(0x200615fcu, 1u); /* s_cyw43Inited */
             cpu.r[0] = 0;
@@ -338,47 +300,8 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
+    /* Configured SSID: real firmware JOIN / DHCP / DNS / NTP (no synthetic OK). */
     if (mem_read8(USB_GUEST_WIFI_SSID) != 0u) {
-        if (a2bus_real_wifi()) {
-            return 0; /* real JOIN path */
-        }
-        if (pc == USB_GUEST_DO_TEST_WIFI || pc == 0x20004548u) {
-            fprintf(stderr,
-                    "[A2Bus] DoTestWifi: configured SSID → synthetic OK "
-                    "(192.168.4.2/24)\n");
-            fflush(stderr);
-            a2bus_complete_testwifi_ok();
-            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-            return 1;
-        }
-        if (pc == USB_GUEST_TEST_WIFI) {
-            uint32_t result = cpu.r[0];
-            if (result != 0u) {
-                mem_write32(result + 16u, USB_GUEST_NETERR_NONE);
-                mem_write8(result + 20u, 1u);
-            }
-            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-            return 1;
-        }
-        /* Synthetic NTP: seed rtcRunning; CMD_GETTIMESTR uses host calendar stub. */
-        if (pc == USB_GUEST_GET_NETWORK_TIME || pc == 0x200044b0u) {
-            uint8_t cfg1 = mem_read8(USB_GUEST_CONFIG_BUFFER + 4u);
-            if ((cfg1 & USB_GUEST_NTPCLIENTFLAG) == 0u) {
-                cpu.r[0] = USB_GUEST_NETERR_NONE;
-                cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-                return 1;
-            }
-            a2bus_seed_megaflash_rtc();
-            static int ntp_logged;
-            if (!ntp_logged++) {
-                fprintf(stderr,
-                        "[A2Bus] GetNetworkTime: synthetic NTP OK (host clock)\n");
-                fflush(stderr);
-            }
-            cpu.r[0] = USB_GUEST_NETERR_NONE;
-            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-            return 1;
-        }
         return 0;
     }
 
