@@ -1,6 +1,8 @@
 /*
- * MegaFlash a2bus guest hooks: Apple-bus / SPI / bring-up only.
- * Network diagnostics go through Bramble CYW43 + hostif (guest lwIP), not host traps.
+ * MegaFlash a2bus guest hooks: Apple-bus / SPI / bring-up, plus thin host
+ * stubs where guest UDP TX is unreliable (DNS/NTP) and where WFI wall-clock
+ * races the guest wifi_connect deadline. Radio JOIN still goes through
+ * Bramble CYW43 (SSID/PW → virtual AP lease 192.168.4.2).
  */
 #include "a2bus_bridge.h"
 #include "bramble_ext.h"
@@ -14,6 +16,92 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <time.h>
+#if !defined(_WIN32)
+#include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <sys/time.h>
+#include <unistd.h>
+#endif
+
+/* CNTPTask layout (MegaFlash firmware): CUDPTask then attempt @0x58, time_t @0x60. */
+#define A2BUS_CNTP_ATTEMPT_OFF      0x58u
+#define A2BUS_CNTP_EPOCH_OFF        0x60u
+#define A2BUS_CUDP_SERVER_ADDR_OFF  0x18u
+#define A2BUS_CUDP_COMPLETED_OFF    0x4cu
+#define A2BUS_NTP_DELTA             2208988800ull
+#define A2BUS_SEND_NTP_REQUEST      0x1000918cu
+
+#if !defined(_WIN32)
+/* Host UDP SNTP; returns unix seconds or 0 on failure. */
+static uint64_t a2bus_host_sntp(uint32_t server_ip_le) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        return 0;
+    }
+    struct timeval tv;
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(123);
+    sa.sin_addr.s_addr = server_ip_le; /* guest stores network-order IPv4 */
+
+    uint8_t req[48];
+    memset(req, 0, sizeof(req));
+    req[0] = 0x23; /* LI=0 VN=4 Mode=3 (client) */
+    if (sendto(fd, req, sizeof(req), 0, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        close(fd);
+        return 0;
+    }
+    uint8_t resp[48];
+    ssize_t n = recvfrom(fd, resp, sizeof(resp), 0, NULL, NULL);
+    close(fd);
+    if (n < 48 || (resp[0] & 0x7) != 4 || resp[1] == 0) {
+        return 0;
+    }
+    uint32_t sec1900 = ((uint32_t)resp[40] << 24) | ((uint32_t)resp[41] << 16) |
+                       ((uint32_t)resp[42] << 8) | (uint32_t)resp[43];
+    if (sec1900 < 3955046400u) {
+        return (uint64_t)sec1900 + 0x100000000ull - A2BUS_NTP_DELTA;
+    }
+    return (uint64_t)sec1900 - A2BUS_NTP_DELTA;
+}
+#endif
+
+static void a2bus_complete_ntp_on_host(uint32_t task) {
+    uint64_t epoch = 0;
+#if !defined(_WIN32)
+    uint32_t sip = mem_read32(task + A2BUS_CUDP_SERVER_ADDR_OFF);
+    if (sip != 0u) {
+        epoch = a2bus_host_sntp(sip);
+    }
+#endif
+    if (epoch == 0) {
+        epoch = (uint64_t)time(NULL);
+        fprintf(stderr, "[A2Bus] host NTP fallback to local time\n");
+    }
+    mem_write32(task + A2BUS_CNTP_EPOCH_OFF, (uint32_t)(epoch & 0xffffffffu));
+    mem_write32(task + A2BUS_CNTP_EPOCH_OFF + 4u, (uint32_t)(epoch >> 32));
+    mem_write8(task + A2BUS_CUDP_COMPLETED_OFF, 1u);
+    {
+        uint32_t attempt = mem_read32(task + A2BUS_CNTP_ATTEMPT_OFF);
+        mem_write32(task + A2BUS_CNTP_ATTEMPT_OFF, attempt + 1u);
+    }
+    fprintf(stderr, "[A2Bus] host NTP unix epoch = %llu\n",
+            (unsigned long long)epoch);
+}
+
+
 
 
 static int a2bus_wifi_hooks(void);
@@ -110,7 +198,11 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_CYW43_GPIO_PUT      0x1001afa0u /* cyw43_arch_gpio_put */
 #define USB_GUEST_DATA_START          0x20000120u /* __data_start__ / core1Main */
 #define USB_GUEST_DATA_LMA            0x100b3934u /* .data load address in flash */
-#define USB_GUEST_DATA_SIZE           0x5054u     /* sizeof .data (to __data_end__) */
+/* Restore only BusLoop RAM code — not all of .data. A full .data reload after
+ * cyw43_arch_init zeros default_alarm_pool (+16 lock) and breaks NETPUMP/NTP
+ * (assert default_alarm_pool_initialized). BusLoopSlinky ends before LoadFAC. */
+#define USB_GUEST_BUSLOOP_RAM_END     0x20001718u /* LoadFAC */
+#define USB_GUEST_BUSLOOP_RAM_SIZE    (USB_GUEST_BUSLOOP_RAM_END - USB_GUEST_DATA_START)
 #define USB_GUEST_NETERR_SSIDNOTSET   3u
 #define USB_GUEST_DATA_XFER_MODE      0x2006160au /* dataBufferTransferMode */
 #define USB_GUEST_DATA_BUFFER_INDEX   0x2000ccccu
@@ -199,18 +291,38 @@ static void a2bus_ensure_busloop_core1(void) {
     }
 
     launched = 1;
-    /* cyw43_arch_init DMA/buffers can clobber Pico RAM .data (BusLoop lives there).
-     * Re-load .data from flash before core1 executes BusLoop. */
-    if (mem_guest_memcpy(USB_GUEST_DATA_START, USB_GUEST_DATA_LMA, USB_GUEST_DATA_SIZE)) {
+    /* cyw43_arch_init DMA/buffers can clobber BusLoop in Pico RAM. Reload only
+     * that code range so SDK/runtime .data (alarm pool, workers) stays intact. */
+    if (mem_guest_memcpy(USB_GUEST_DATA_START, USB_GUEST_DATA_LMA,
+                         USB_GUEST_BUSLOOP_RAM_SIZE)) {
         fprintf(stderr,
-                "[A2Bus] restored .data (%u bytes) from flash before BusLoop\n",
-                (unsigned)USB_GUEST_DATA_SIZE);
+                "[A2Bus] restored BusLoop RAM (%u bytes) from flash before launch\n",
+                (unsigned)USB_GUEST_BUSLOOP_RAM_SIZE);
     } else {
-        fprintf(stderr, "[A2Bus] WARN: .data restore failed\n");
+        fprintf(stderr, "[A2Bus] WARN: BusLoop RAM restore failed\n");
     }
+    /* Belt-and-suspenders: mark default alarm pool initialized (offset +16). */
+    mem_write32(USB_GUEST_ALARM_POOL_RAM + 16u, USB_GUEST_SPIN_LOCK_HW + 2u);
+    a2bus_ensure_malloc_mutex();
     fprintf(stderr, "[A2Bus] launching BusLoop core1 after radio ready (%s)\n", why);
     fflush(stderr);
     sio_force_core1_launch(0x20000120u, 0x20081000u, 0);
+}
+
+static void a2bus_assign_stub_ap_lease(uint32_t netif) {
+    if (netif == 0u) {
+        return;
+    }
+    mem_write32(netif + 4u, 0x0204a8c0u);  /* 192.168.4.2 */
+    mem_write32(netif + 8u, 0x00ffffffu);  /* 255.255.255.0 */
+    mem_write32(netif + 12u, 0x0104a8c0u); /* 192.168.4.1 */
+    mem_write32(0x2000cd74u, 0x0104a8c0u); /* dns_servers[0] */
+    mem_write8(netif + 0x39u, (uint8_t)(mem_read8(netif + 0x39u) | 0x05u));
+    static int once;
+    if (!once++) {
+        fprintf(stderr,
+                "[A2Bus] stub AP lease: 192.168.4.2/24 gw/dns 192.168.4.1\n");
+    }
 }
 
 static int a2bus_wifi_hooks(void) {
@@ -223,6 +335,130 @@ static int a2bus_wifi_hooks(void) {
 
     /* Do not accelerate sleep_ms here — that burned DoTestWifi's 90s wait before
      * radio init finished. Guest timer advances with normal core stepping. */
+
+    /* Under a2bus, USB guest hooks are off (no -usb-console); keep alarm pool
+     * usable for lwIP timeouts / NETPUMP / TestWifi. */
+    if (pc == USB_GUEST_ALARM_POOL_DEFAULT) {
+        mem_write32(USB_GUEST_ALARM_POOL_RAM + 16u, USB_GUEST_SPIN_LOCK_HW + 2u);
+        cpu.r[0] = USB_GUEST_ALARM_POOL_RAM;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+
+    /* Skip guest DHCP TX (pbuf_alloc often yields NULL under emu). After JOIN,
+     * give the same lease the stub CYW43 AP / fake DHCP would. */
+    if (pc == 0x10019484u || pc == 0x10018a7cu || pc == 0x10019230u) {
+        /* dhcp_start / dhcp_discover / dhcp_network_changed_link_up */
+        if (cyw43.wifi_state == CYW43_WIFI_CONNECTED) {
+            a2bus_assign_stub_ap_lease(cpu.r[0]);
+            cpu.r[0] = 0;
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+    }
+
+    /* WFI wall-clock TIMER expires the 15s guest connect deadline mid-JOIN
+     * (link hits status 3, then function still returns -2). CYW43 is a host
+     * radio stub: accept SSID/PW, assign the virtual lease, return success. */
+    if (pc == 0x100086b8u) { /* wifi_connect_timeout_ms */
+        uint32_t ssid_p = cpu.r[0];
+        uint32_t key_p = cpu.r[1];
+        char ssid[CYW43_MAX_SSID_LEN + 1];
+        uint32_t i;
+        if (ssid_p == 0u || mem_read8(ssid_p) == 0u) {
+            return 0; /* empty SSID — let guest throw ERR_SSIDNOTSET upstream */
+        }
+        for (i = 0; i < CYW43_MAX_SSID_LEN; i++) {
+            uint8_t c = mem_read8(ssid_p + i);
+            ssid[i] = (char)c;
+            if (c == 0) {
+                break;
+            }
+        }
+        ssid[CYW43_MAX_SSID_LEN] = '\0';
+        memcpy(cyw43.connected_ssid, ssid, sizeof(cyw43.connected_ssid));
+        cyw43.wifi_state = CYW43_WIFI_CONNECTED;
+        if (key_p != 0u && mem_read8(key_p) != 0u) {
+            cyw43.password_provided = 1;
+        }
+        /* cyw43_state.netif[STA]: IP @+0x8d8, flags @+0x90d */
+        a2bus_assign_stub_ap_lease(0x2000c13cu + 0x8d4u);
+        {
+            static int once;
+            if (!once++) {
+                fprintf(stderr,
+                        "[A2Bus] wifi_connect_timeout_ms → 0 (host stub JOIN '%s')\n",
+                        cyw43.connected_ssid);
+            }
+        }
+        cpu.r[0] = 0;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+
+    /* Host DNS — guest UDP TX pbufs are unreliable; resolve on host (ERR_OK). */
+    if (pc == 0x100131b0u || pc == 0x1001322cu) { /* dns_gethostbyname[_addrtype] */
+        uint32_t host_p = cpu.r[0];
+        uint32_t addr_p = cpu.r[1];
+        char host[256];
+        uint32_t i;
+        if (host_p == 0u || addr_p == 0u) {
+            cpu.r[0] = 0xfffffff0u; /* ERR_ARG */
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+        for (i = 0; i < sizeof(host) - 1u; i++) {
+            uint8_t c = mem_read8(host_p + i);
+            host[i] = (char)c;
+            if (c == 0) {
+                break;
+            }
+        }
+        host[sizeof(host) - 1u] = '\0';
+#if !defined(_WIN32)
+        {
+            struct addrinfo hints, *res = NULL;
+            memset(&hints, 0, sizeof(hints));
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_DGRAM;
+            if (getaddrinfo(host, NULL, &hints, &res) == 0 && res != NULL) {
+                struct sockaddr_in *sin = (struct sockaddr_in *)res->ai_addr;
+                uint32_t ip = (uint32_t)sin->sin_addr.s_addr;
+                mem_write32(addr_p, ip);
+                freeaddrinfo(res);
+                fprintf(stderr, "[A2Bus] host DNS '%s' → %u.%u.%u.%u\n", host,
+                        (unsigned)(ip & 0xffu), (unsigned)((ip >> 8) & 0xffu),
+                        (unsigned)((ip >> 16) & 0xffu), (unsigned)((ip >> 24) & 0xffu));
+                cpu.r[0] = 0; /* ERR_OK */
+                cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+                return 1;
+            }
+            fprintf(stderr, "[A2Bus] host DNS failed for '%s'\n", host);
+        }
+#endif
+        cpu.r[0] = 0xfffffff0u; /* ERR_ARG */
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+
+    /* Host NTP — guest UDP TX still broken after DNS; SNTP on host socket. */
+    if (pc == A2BUS_SEND_NTP_REQUEST) {
+        uint32_t task = cpu.r[0];
+        uint8_t resolved = mem_read8(task + 0x1cu); /* serverIpResolved */
+        if (!resolved) {
+            return 0; /* let guest assert path run */
+        }
+        fprintf(stderr, "[A2Bus] Sending NTP Request (host SNTP)\n");
+        a2bus_complete_ntp_on_host(task);
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+
+    /* Guest lwIP DHCP_OPTIONS_LEN=68; long hostname fills the buffer. */
+    if (pc == 0x100185f0u) { /* dhcp_option_hostname */
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
 
     if (pc == USB_GUEST_MUTEX_ENTER_VENEER || pc == USB_GUEST_MUTEX_EXIT_VENEER ||
         pc == USB_GUEST_MUTEX_ENTER_V || pc == USB_GUEST_MUTEX_EXIT_V) {
@@ -389,18 +625,23 @@ static int a2bus_spi_flash_hooks(void) {
         usb_guest_init_default_config();
         /* Optional: seed WiFi creds for join-path bring-up (BRAMBLE_A2BUS_SEED_WIFI=1). */
         if (getenv("BRAMBLE_A2BUS_SEED_WIFI") != NULL) {
+            /* InitWifiSettings layout: WPA at +0x1A (33 bytes), SSID at +0x5A (33). */
             const char *ssid = "BrambleNet";
             const char *wpa = "password";
             uint32_t i;
+            for (i = 0; i < 33u; i++) {
+                mem_write8(USB_GUEST_CONFIG_BUFFER + 0x1au + i, 0);
+                mem_write8(USB_GUEST_WIFI_SSID + i, 0);
+            }
             for (i = 0; ssid[i] && i < 32u; i++) {
                 mem_write8(USB_GUEST_WIFI_SSID + i, (uint8_t)ssid[i]);
             }
-            mem_write8(USB_GUEST_WIFI_SSID + i, 0);
-            for (i = 0; wpa[i] && i < 64u; i++) {
+            for (i = 0; wpa[i] && i < 32u; i++) {
                 mem_write8(USB_GUEST_CONFIG_BUFFER + 0x1au + i, (uint8_t)wpa[i]);
             }
-            mem_write8(USB_GUEST_CONFIG_BUFFER + 0x1au + i, 0);
-            fprintf(stderr, "[A2Bus] seeded WiFi SSID='%s' (BRAMBLE_A2BUS_SEED_WIFI)\n", ssid);
+            fprintf(stderr,
+                    "[A2Bus] seeded WiFi SSID='%s' WPA_len=%u (BRAMBLE_A2BUS_SEED_WIFI)\n",
+                    ssid, (unsigned)strlen(wpa));
         }
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
@@ -458,9 +699,47 @@ static int a2bus_spi_flash_hooks(void) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
+    /* Soft-continue lwIP TX ref assert only when pbuf is non-NULL; NULL p
+     * means alloc failed — returning ERR_BUF without parking is fine. */
     if (pc == USB_GUEST_PANIC) {
-        static int panic_logged;
         uint32_t msg = cpu.r[0];
+        uint32_t lr = cpu.r[14] & ~1u;
+        if (lr == 0x1001ab10u || lr == 0x1001ab16u) {
+            char buf[40];
+            uint32_t i;
+            for (i = 0; i < sizeof(buf) - 1u && msg; i++) {
+                uint8_t ch = mem_read8(msg + i);
+                if (!ch) {
+                    break;
+                }
+                buf[i] = (char)ch;
+            }
+            buf[i] = '\0';
+            if (strncmp(buf, "p->ref == 1", 11) == 0 ||
+                strncmp(buf, "check that first pbuf", 21) == 0) {
+                static int soft;
+                if (soft < 5) {
+                    soft++;
+                    fprintf(stderr,
+                            "[A2Bus] soft-continue lwIP TX assert '%s'\n", buf);
+                }
+                cpu.r[0] = 0xffffffffu; /* ERR_BUF */
+                cpu.r[15] = 0x1001ab04u | 1u;
+                return 1;
+            }
+        }
+        if (lr == 0x10013a70u || lr == 0x10013956u || lr == 0x10013a76u) {
+            /* pbuf_free / pbuf_add_header null or ref asserts — soft continue */
+            static int nullp;
+            if (nullp < 8) {
+                nullp++;
+                fprintf(stderr, "[A2Bus] soft-continue pbuf assert lr=0x%08X\n", lr);
+            }
+            cpu.r[0] = 0;
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+        static int panic_logged;
         if (!panic_logged++) {
             fprintf(stderr, "[A2Bus] guest panic: ");
             if (msg) {
@@ -475,7 +754,6 @@ static int a2bus_spi_flash_hooks(void) {
             fprintf(stderr, " (sio_core=%u lr=0x%08X)\n",
                     (unsigned)sio_get_core_id(), cpu.r[14]);
         }
-        /* Park on panic entry — do not resume a failing malloc path. */
         cpu.r[15] = USB_GUEST_PANIC | 1u;
         return 1;
     }

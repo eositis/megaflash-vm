@@ -51,12 +51,18 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP (radio-faithful):** Guest `cyw43_arch` + lwIP own JOIN / DHCP / DNS / NTP. Bramble emulates the CYW43 radio; `-wifi -tap` bridges frames to host utun + pf NAT (`docs/eositis/MACOS-WIFI.md` in Bramble). The overlay does **not** complete TestWifi/GetNetworkTime on the host.
+**Test Wifi / NTP (radio stub → host):** Bramble CYW43 accepts SSID/password and links to a virtual AP (`192.168.4.2/24`). Guest `cyw43_arch` still owns the control flow (ConnectWifi → NETPUMP → DNS/NTP). Under a2bus, wall-clock WFI races the guest 15s join deadline and guest UDP TX pbufs are unreliable, so the overlay:
+
+1. Completes `wifi_connect_timeout_ms` as a host stub JOIN + static lease (same IPs the in-chip DHCP would give).
+2. Resolves DNS on the host (`dns_gethostbyname`).
+3. Completes NTP via host SNTP (or local time fallback) into `CNTPTask`, so `GetNetworkTime` → `InitRTC` runs.
+
+`-wifi -tap` + pf NAT remains the path for real Ethernet through the host (`docs/eositis/MACOS-WIFI.md` in Bramble). Empty SSID still fails fast (`NETERR_SSIDNOTSET`).
 
 Bring-up under a2bus:
 
 1. Core0 runs real `cyw43_arch_init` (FEEDBEAD + CLM) **before** BusLoop starts — concurrent gSPI + BusLoop HardFaults core1.
-2. After init, overlay restores clobbered `.data` (BusLoop lives in Pico RAM) and launches core1.
+2. After init, overlay restores **BusLoop RAM only** (not all of `.data` — a full reload zeros `default_alarm_pool`) and launches core1.
 3. Guest timers track host wall time while a core is in WFI/WFE (so `sleep_until` during radio bring-up is not starved by BusLoop).
 4. Empty SSID still fails fast (`NETERR_SSIDNOTSET`) — C++ EH gap, not radio policy.
 5. `BRAMBLE_A2BUS_STUB_WIFI=1` — emergency stub of `cyw43_arch_init` only (WIP debt, not the product path).
