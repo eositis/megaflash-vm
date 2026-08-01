@@ -29,8 +29,8 @@ From this repo:
 
 What it does:
 
-1. Starts Bramble (`BRAMBLE_ROOT`, default `../Bramble`) with `-arch m33 -clock 150 -cores 2 -a2bus-bridge 19765` and `scripts/megaflash-mame.stub` (PHI0 + core1 launch).
-2. Waits for a TCP `PING` on `127.0.0.1:19765`.
+1. Starts Bramble (`BRAMBLE_ROOT`, default `../Bramble`) with `-arch m33 -clock 150 -cores 2 -wifi -tap -a2bus-bridge 19765` and `scripts/megaflash-mame.stub` (PHI0; BusLoop launched after radio).
+2. Waits for a TCP `PING` on `127.0.0.1:19765` and BusLoop ready.
 3. Starts `mame apple2c4` with `-plugin megaflash_bridge` (Lua taps on `$C0C0–$C0C3`).
 
 **Do not** pass `-ramsize` above the default **128K**. Extra RAM enables MAME’s built-in Slinky and conflicts with MegaFlash.
@@ -51,12 +51,15 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP:** Boot still stubs `cyw43_arch_init` (required for BusLoop). Guest lwIP NTP over CYW43 is **not** used under a2bus (same timeout/hang issue). Instead the overlay:
-1. Completes Test Wifi with guest IPs `192.168.4.2/24` plus a **real host DNS** probe.
-2. Sends a **real host SNTP** query to `pool.ntp.org:123`, then applies MegaFlash’s `InitRTC(utc, tz)` contract (guest `rtcRunning` + AON calendar stubs) so the CP clock / ProDOS timestamps advance from that NTP response.
-3. Intercepts `GetNetworkTime` the same way (and forces `IsAppleConnected` so `core0Loop` can call it).
+**Test Wifi / NTP (radio-faithful):** Guest `cyw43_arch` + lwIP own JOIN / DHCP / DNS / NTP. Bramble emulates the CYW43 radio; `-wifi -tap` bridges frames to host utun + pf NAT (`docs/eositis/MACOS-WIFI.md` in Bramble). The overlay does **not** complete TestWifi/GetNetworkTime on the host.
 
-Empty SSID still fails fast with `NETERR_SSIDNOTSET`. Look for log lines `[A2Bus] host NTP ok` and `[A2Bus] InitRTC from NTP:`. Launcher still passes `-wifi -tap` + macOS admin dialog for utun/pf.
+Bring-up under a2bus:
+
+1. Core0 runs real `cyw43_arch_init` (FEEDBEAD + CLM) **before** BusLoop starts — concurrent gSPI + BusLoop HardFaults core1.
+2. After init, overlay restores clobbered `.data` (BusLoop lives in Pico RAM) and launches core1.
+3. Guest timers track host wall time while a core is in WFI/WFE (so `sleep_until` during radio bring-up is not starved by BusLoop).
+4. Empty SSID still fails fast (`NETERR_SSIDNOTSET`) — C++ EH gap, not radio policy.
+5. `BRAMBLE_A2BUS_STUB_WIFI=1` — emergency stub of `cyw43_arch_init` only (WIP debt, not the product path).
 
 On **macOS**, the launcher uses `sudo -A` with `scripts/macos-sudo-askpass.sh` so you get a **GUI admin dialog** once: enable pf NAT for `192.168.4.0/24`, then start Bramble as root for utun. Approve that dialog, wait for BusLoop ready, then MAME starts.
 
@@ -68,14 +71,14 @@ Firmware `[u2macraw]` telemetry from `U2_Net_Poll` is suppressed on a2bus stderr
 
 When MAME exits, Bramble shuts down: the launcher no longer `exec`s MAME (so its EXIT trap can kill Bramble), and the bridge also requests exit after a client that issued READ/WRITE disconnects (preflight PING/PEEK alone does not).
 
-**Host NAT / real internet:** See Bramble `docs/eositis/MACOS-WIFI.md`. Launcher helper: `scripts/macos-host-net-prep.sh` → Bramble `macos-cyw43-pf-nat.sh`.
+**Host NAT / real internet:** See Bramble `docs/eositis/MACOS-WIFI.md`. Launcher helper: `scripts/macos-host-net-prep.sh` → Bramble `macos-cyw43-pf-nat.sh`. Virtual AP + DHCP `192.168.4.2` — guest does **not** join the Mac’s real SSID.
 
 Bring-up notes (a2bus):
 
-- Skip `stdio_usb_init` so core0 reaches `InitPicoLed`; stub boot `cyw43_arch_init`; TestWifi/NTP completed via host DNS/NTP + guest IPs.
-- Host-format `__wrap_printf`, stub `hw_claim_*` / `check_alloc`, skip firmware `multicore_launch` when the script already started core1.
+- Skip `stdio_usb_init` so core0 reaches `InitPicoLed` / real `cyw43_arch_init`; launch BusLoop after radio ready.
+- Host-format `__wrap_printf`, stub `hw_claim_*`, skip firmware `multicore_launch` (hooks launch core1 post-radio).
 - Force `CheckPicoW()==true` when `-wifi` is on.
-- Default `-tap` / pf (macOS) so Test Wifi DNS/NTP are real diagnostics after BusLoop is up.
+- Default `-tap` / pf (macOS) so guest DNS/NTP use the host stack through the emulated radio.
 
 `CMD_COLDSTART` must finish before the Apple reads `configbyte1`. The bridge pump waits for a full STATUS **BUSY→idle** cycle (no early exit if BUSY was never seen). A premature return left `configbyte1=0`, which clears `AUTOBOOTFLAG` and makes the IIc firmware skip slot 4 (`NEXTBOOTSLOT=$C6`).
 
@@ -98,7 +101,7 @@ Bring-up notes (a2bus):
 | `TIMEOUT` | unset (none) | Bramble `-timeout` seconds |
 | `NO_WIFI` | unset | `1` = do not pass `-wifi` |
 | `NO_HOST_NET` | unset | `1` = `-wifi` without `-tap` / pf |
-| `BRAMBLE_A2BUS_REAL_WIFI` | unset | `1` = no boot cyw43 stub (BusLoop/TestWifi may die; debug) |
+| `BRAMBLE_A2BUS_STUB_WIFI` | unset | `1` = stub `cyw43_arch_init` (emergency; BusLoop WIP debt) |
 | `BRAMBLE_A2BUS_SEED_WIFI` | unset | `1` = seed BrambleNet SSID/password in config |
 | `BRAMBLE_A2BUS_U2MACRAW` | unset | `1` = print firmware `[u2macraw]` poll telemetry |
 
@@ -122,7 +125,7 @@ After ID is live (`$96`/`$69`) and STATUS is idle, Bramble mirrors BusLoop DATA/
 
 Host-side DATA pointer advance must read `dataBufferTransferMode` as an **8-bit** BSS field. A 32-bit load pulled adjacent flags (`dhcp_pcb_refcount`, …) and treated `MODE_LINEAR` as interleaved, which corrupted `CMD_GETUSERSETTINGS` (control panel **Unexpected Error:0**) and any other linear transfer.
 
-Script `core1launch` starts BusLoop on core1 while core0 may still be in crt0/`InitSpi`. a2bus hooks late-seed `configBuffer` on `GetUserSettings` so option 7 validation sees `timezoneidver=1` even when `LoadAllConfigs` never ran on core0.
+Script PHI0 enables `IsAppleConnected`. BusLoop core1 is launched by a2bus hooks **after** `cyw43_arch_init` (and `.data` restore); early concurrent gSPI HardFaults BusLoop.
 
 Control-panel **Save** must not run real SPI security-register programming under a2bus (`EncryptWriteConfigToFlash` would leave STATUS BUSY and freeze on **Saving...**). Settings are applied in SRAM and mirrored to `flash/megaflash-user-config.bin`.
 
