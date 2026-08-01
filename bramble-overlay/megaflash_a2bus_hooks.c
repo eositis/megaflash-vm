@@ -15,6 +15,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 
 
 static int a2bus_rtc_hooks(void);
@@ -206,62 +213,174 @@ static void a2bus_ensure_malloc_mutex(void) {
 }
 
 /*
- * Boot-time cyw43_arch_init (InitPicoLed on core0) must be stubbed while
- * BusLoopSlinky runs on core1 — concurrent real gSPI HardFaults BusLoop and
- * MAME reports "MegaFlash not found".
+ * Boot-time cyw43_arch_init must stay stubbed: concurrent gSPI + BusLoop HardFaults
+ * core1 ("MegaFlash not found"). Guest TestWifi that re-inits CYW43 also fails under
+ * a2bus — sleep_ms stubs burn the 90s guest timeout before CLM load finishes, then
+ * the CP prints a corrupt/empty dataBuffer (zero flood).
  *
- * Default: stub boot init; on first TestWifi / GetNetworkTime with a configured
- * SSID, clear s_cyw43Inited and allow real JOIN/DNS/NTP (hostif when -tap).
+ * Diagnostics: keep boot stubs; complete DoTestWifi / GetNetworkTime with guest
+ * virtual IPs (192.168.4.2/24) plus real host DNS/NTP probes (Mac's network / NAT).
  *
- * BRAMBLE_A2BUS_REAL_WIFI=1  — never stub (BusLoop may die; debug only)
- * BRAMBLE_A2BUS_STUB_WIFI=1  — always stub boot helpers (no deferred real path)
+ * BRAMBLE_A2BUS_REAL_WIFI=1 — never stub (debug only; BusLoop/TestWifi may die)
  */
-static int a2bus_wifi_defer_real = 1; /* cleared when diagnostics request net */
-
 static int a2bus_boot_stub_cyw43(void) {
-    static int policy = -1; /* 0=never stub, 1=always stub, 2=defer (default) */
-    if (policy < 0) {
+    static int cached = -1;
+    if (cached < 0) {
         const char *real = getenv("BRAMBLE_A2BUS_REAL_WIFI");
-        const char *stub = getenv("BRAMBLE_A2BUS_STUB_WIFI");
-        if (real && real[0] == '1' && real[1] == '\0') {
-            policy = 0;
-            a2bus_wifi_defer_real = 0;
-            fprintf(stderr, "[A2Bus] BRAMBLE_A2BUS_REAL_WIFI=1 — no boot cyw43 stub\n");
-        } else if (stub && stub[0] == '1' && stub[1] == '\0') {
-            policy = 1;
-            a2bus_wifi_defer_real = 0;
-            fprintf(stderr, "[A2Bus] BRAMBLE_A2BUS_STUB_WIFI=1 — cyw43 stub only\n");
+        cached = (real && real[0] == '1' && real[1] == '\0') ? 0 : 1;
+        if (!cached) {
+            fprintf(stderr, "[A2Bus] BRAMBLE_A2BUS_REAL_WIFI=1 — no cyw43 stub\n");
         } else {
-            policy = 2;
             fprintf(stderr,
-                    "[A2Bus] boot-stub cyw43_arch_init (BusLoop-safe); "
-                    "real JOIN/DNS/NTP on TestWifi/NTP with SSID\n");
+                    "[A2Bus] boot-stub cyw43; TestWifi/NTP use host DNS/NTP + "
+                    "guest IPs 192.168.4.2/24\n");
         }
     }
-    if (policy == 0) {
-        return 0;
-    }
-    if (policy == 1) {
-        return 1;
-    }
-    return a2bus_wifi_defer_real;
+    return cached;
 }
 
-static void a2bus_arm_real_wifi_for_diagnostics(void) {
-    if (!a2bus_wifi_defer_real) {
-        return;
+#define USB_GUEST_NETERR_DNSFAILED  9u
+#define USB_GUEST_NETERR_NTPFAILED  10u
+#ifndef USB_GUEST_NETERR_NONE
+#define USB_GUEST_NETERR_NONE       11u
+#endif
+#ifndef USB_GUEST_NTPCLIENTFLAG
+#define USB_GUEST_NTPCLIENTFLAG     0x10u
+#endif
+
+static void a2bus_write_cstr(uint32_t *dest, const char *s) {
+    while (*s) {
+        mem_write8((*dest)++, (uint8_t)*s++);
     }
-    a2bus_wifi_defer_real = 0;
-    mem_write8(0x200615fcu, 0u); /* s_cyw43Inited — force real cyw43_arch_init */
+    mem_write8((*dest)++, 0);
+}
+
+/* Guest CYW43 DHCP picture (matches Bramble cyw43.c / tapif). */
+static void a2bus_fill_testwifi_addrs(uint8_t err) {
+    mem_write8(USB_GUEST_PARAMETER_BUFFER, err);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 1u, 192);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 2u, 168);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 3u, 4);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 4u, 2);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 5u, 255);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 6u, 255);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 7u, 255);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 8u, 0);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 9u, 192);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 10u, 168);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 11u, 4);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 12u, 1);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 13u, 192);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 14u, 168);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 15u, 4);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 16u, 1);
+
+    uint32_t d = USB_GUEST_DATA_BUFFER;
+    a2bus_write_cstr(&d, "192.168.4.2");
+    a2bus_write_cstr(&d, "255.255.255.0");
+    a2bus_write_cstr(&d, "192.168.4.1");
+    a2bus_write_cstr(&d, "192.168.4.1");
+
+    mem_write8(USB_GUEST_DATA_XFER_MODE, 0);
+    mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
+    mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
+    mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
+    mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
+}
+
+static int a2bus_host_dns_probe(const char *host) {
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    int rc = getaddrinfo(host, "53", &hints, &res);
+    if (rc != 0) {
+        fprintf(stderr, "[A2Bus] host DNS fail %s: %s\n", host, gai_strerror(rc));
+        fflush(stderr);
+        return -1;
+    }
+    freeaddrinfo(res);
+    fprintf(stderr, "[A2Bus] host DNS ok (%s)\n", host);
+    fflush(stderr);
+    return 0;
+}
+
+/* Minimal SNTP client; returns 0 and sets *epoch_out on success. */
+static int a2bus_host_ntp_query(time_t *epoch_out) {
+    struct addrinfo hints;
+    struct addrinfo *res = NULL;
+    struct addrinfo *rp;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    int rc = getaddrinfo("pool.ntp.org", "123", &hints, &res);
+    if (rc != 0) {
+        fprintf(stderr, "[A2Bus] NTP DNS fail: %s\n", gai_strerror(rc));
+        return -1;
+    }
+
+    uint8_t packet[48];
+    memset(packet, 0, sizeof(packet));
+    packet[0] = 0x1b; /* LI=0 VN=3 Mode=3 (client) */
+
+    int ok = -1;
+    for (rp = res; rp != NULL; rp = rp->ai_next) {
+        int fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+        if (fd < 0) {
+            continue;
+        }
+        struct timeval tv;
+        tv.tv_sec = 3;
+        tv.tv_usec = 0;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        if (sendto(fd, packet, sizeof(packet), 0, rp->ai_addr, rp->ai_addrlen) ==
+            (ssize_t)sizeof(packet)) {
+            uint8_t reply[48];
+            ssize_t n = recvfrom(fd, reply, sizeof(reply), 0, NULL, NULL);
+            if (n >= 48) {
+                uint32_t sec = ((uint32_t)reply[40] << 24) | ((uint32_t)reply[41] << 16) |
+                               ((uint32_t)reply[42] << 8) | (uint32_t)reply[43];
+                if (sec > 2208988800u) {
+                    *epoch_out = (time_t)(sec - 2208988800u);
+                    ok = 0;
+                }
+            }
+        }
+        close(fd);
+        if (ok == 0) {
+            break;
+        }
+    }
+    freeaddrinfo(res);
+    if (ok == 0) {
+        fprintf(stderr, "[A2Bus] host NTP ok (unix=%ld)\n", (long)*epoch_out);
+        fflush(stderr);
+    } else {
+        fprintf(stderr, "[A2Bus] host NTP failed\n");
+        fflush(stderr);
+    }
+    return ok;
+}
+
+static void a2bus_complete_testwifi_diag(void) {
+    uint8_t err = USB_GUEST_NETERR_NONE;
+    if (a2bus_host_dns_probe("pool.ntp.org") != 0 &&
+        a2bus_host_dns_probe("dns.google") != 0) {
+        err = USB_GUEST_NETERR_DNSFAILED;
+    }
+    a2bus_fill_testwifi_addrs(err);
     fprintf(stderr,
-            "[A2Bus] arming real CYW43 for network diagnostic "
-            "(DNS/NTP via hostif when -tap)\n");
+            "[A2Bus] DoTestWifi: SSID set → IP 192.168.4.2/24 err=%u "
+            "(%u=NONE %u=DNSFAILED)\n",
+            (unsigned)err, (unsigned)USB_GUEST_NETERR_NONE,
+            (unsigned)USB_GUEST_NETERR_DNSFAILED);
     fflush(stderr);
 }
 
 /*
- * Empty-SSID TestWifi/NTP uses C++ exceptions (__cxa_throw). Fail fast SSIDNOTSET.
- * Configured SSID: arm real CYW43 (after BusLoop is up) and fall through to firmware.
+ * Empty-SSID: fail fast SSIDNOTSET (C++ throw hang).
+ * Configured SSID: complete CP TestWifi with guest IPs + host DNS/NTP probes.
  */
 static int a2bus_wifi_hooks(void) {
     if (!a2bus_bridge_active() || !cyw43.enabled) {
@@ -323,10 +442,6 @@ static int a2bus_wifi_hooks(void) {
             cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
             return 1;
         }
-    } else if (pc == USB_GUEST_CYW43_GPIO_PUT) {
-        /* LED toggles during real init are harmless to stub. */
-        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-        return 1;
     }
 
     if (pc != USB_GUEST_DO_TEST_WIFI && pc != USB_GUEST_GET_NETWORK_TIME &&
@@ -335,10 +450,51 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
-    /* Configured SSID: real firmware JOIN / DHCP / DNS / NTP (no synthetic OK). */
     if (mem_read8(USB_GUEST_WIFI_SSID) != 0u) {
-        a2bus_arm_real_wifi_for_diagnostics();
-        return 0;
+        if (pc == USB_GUEST_DO_TEST_WIFI || pc == 0x20004548u) {
+            a2bus_complete_testwifi_diag();
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+        if (pc == USB_GUEST_TEST_WIFI) {
+            uint32_t result = cpu.r[0];
+            uint8_t err = USB_GUEST_NETERR_NONE;
+            if (a2bus_host_dns_probe("pool.ntp.org") != 0 &&
+                a2bus_host_dns_probe("dns.google") != 0) {
+                err = USB_GUEST_NETERR_DNSFAILED;
+            }
+            if (result != 0u) {
+                mem_write32(result + 0u, 0x0204a8c0u);
+                mem_write32(result + 4u, 0x00ffffffu);
+                mem_write32(result + 8u, 0x0104a8c0u);
+                mem_write32(result + 12u, 0x0104a8c0u);
+                mem_write32(result + 16u, (uint32_t)err);
+                mem_write8(result + 20u, 1u);
+            }
+            fprintf(stderr, "[A2Bus] TestWifi() IPC complete err=%u\n", (unsigned)err);
+            fflush(stderr);
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+        uint8_t cfg1 = mem_read8(USB_GUEST_CONFIG_BUFFER + 4u);
+        if ((cfg1 & USB_GUEST_NTPCLIENTFLAG) == 0u) {
+            cpu.r[0] = USB_GUEST_NETERR_NONE;
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+        time_t epoch = 0;
+        if (a2bus_host_ntp_query(&epoch) != 0) {
+            cpu.r[0] = USB_GUEST_NETERR_NTPFAILED;
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+        (void)epoch;
+        mem_write8(USB_GUEST_RTC_RUNNING_BSS, 1u);
+        fprintf(stderr, "[A2Bus] GetNetworkTime: host NTP OK → rtcRunning=1\n");
+        fflush(stderr);
+        cpu.r[0] = USB_GUEST_NETERR_NONE;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
     }
 
     if (pc == USB_GUEST_DO_TEST_WIFI || pc == 0x20004548u) {
