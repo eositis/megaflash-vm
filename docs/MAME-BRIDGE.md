@@ -136,6 +136,8 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **Open-Apple device info:** Hold **Open-Apple** while the Control Panel **starts** (before the main menu appears) — not a numbered menu item. On the real IIc, Open-Apple is the solid-apple key **left** of the space bar (`$C061` / button 0). In MAME that is **Left Option/Alt** by default; the launcher `scripts/mame_cfg/apple2c4.cfg` also accepts **Left ⌘** so the left modifier matches the physical key. That path calls `GetInfoString` → `GetDeviceInfoString`. Native `sprintf(%f)` hangs under Bramble and can leave STATUS BUSY (later actions look like “MegaFlash not available”), so a2bus host-completes `DoGetInfoString`.
 
+**CP bottom-line flicker (cols 32–39):** That is `DisplayTime()` — firmware version (`CMD_GETFIRMWAREVER`) plus clock (`CMD_GETTIMESTR`). `DoGetTimeString` uses `sprintf` → newlib `_svfprintf_r`, which hangs under a2bus (BUSY timeout around `0x1002DE12`). Unstick clears BUSY but leaves PARAM garbage; `cgetc_showclock` redraws it constantly. a2bus host-completes `DoGetTimeString` and stubs `_svfprintf_r` / `_svfiprintf_r` (not only `_vfprintf_r`).
+
 **“Option 7” confusion:** Boot-menu **`7) Control Panel`** loads the CP (`CMD_LOAD_CPANEL`). Inside the IIc CP, the 7th highlighted item is usually **Test Wifi/NTP** (1-based). Test Wifi timeout text is `No response from MegaFlash` — different from boot-menu `MegaFlash Not Found`.
 
 

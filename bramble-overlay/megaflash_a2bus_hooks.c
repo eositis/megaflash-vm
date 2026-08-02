@@ -344,6 +344,56 @@ static time_t a2bus_rtc_now_local(void) {
     return a2bus_rtc_base_local + (time(NULL) - a2bus_rtc_host_at_set);
 }
 
+/*
+ * CMD_GETTIMESTR / CP DisplayTime: 8 high-bit chars at cols 32-39 ($7D0+32).
+ * Native DoGetTimeString uses sprintf → _svfprintf_r, which hangs under a2bus
+ * (BUSY timeout at ~0x1002DE12). Unstick then leaves PARAM garbage that the
+ * CP redraws every cgetc_showclock tick — the flickering bottom-line junk.
+ */
+static void a2bus_host_do_get_time_string(void) {
+    char buf[16];
+    uint32_t i;
+
+    if (a2bus_rtc_valid || mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
+        time_t now = a2bus_rtc_now_local();
+        /* InitRTC stores timezone-adjusted wall time as a fake UTC epoch. */
+        struct tm *t = gmtime(&now);
+        if (t) {
+            int h = t->tm_hour;
+            int m = t->tm_min;
+            int h12 = h;
+            if (h12 == 0) {
+                h12 = 12;
+            } else if (h12 >= 13) {
+                h12 -= 12;
+            }
+            snprintf(buf, sizeof(buf), "%2d:%02d AM", h12, m);
+            if (h >= 12) {
+                buf[6] = 'P';
+            }
+            for (i = 0; i < 8u; i++) {
+                mem_write8(USB_GUEST_PARAMETER_BUFFER + i,
+                           (uint8_t)buf[i] | 0x80u);
+            }
+        } else {
+            for (i = 0; i < 8u; i++) {
+                mem_write8(USB_GUEST_PARAMETER_BUFFER + i, (uint8_t)(' ' | 0x80));
+            }
+        }
+    } else {
+        for (i = 0; i < 8u; i++) {
+            mem_write8(USB_GUEST_PARAMETER_BUFFER + i, (uint8_t)(' ' | 0x80));
+        }
+    }
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 8u, 0);
+    mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
+    mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
+    {
+        uint8_t st = mem_read8(USB_GUEST_REGISTERS);
+        mem_write8(USB_GUEST_REGISTERS, (uint8_t)(st & (uint8_t)~0x5Fu));
+    }
+}
+
 #if !defined(_WIN32)
 static int a2bus_host_ntp_query(time_t *epoch_out) {
     struct addrinfo hints;
@@ -907,11 +957,13 @@ static int a2bus_spi_flash_hooks(void) {
         return 1;
     }
     /*
-     * Host-format guest printf. Never enter newlib _vfprintf_r under a2bus:
-     * dual-core smash turns mbtowc into 0x30034280 → HardFault → BusLoop stuck
-     * → boot-menu option 7 "MegaFlash Not Found" even though SmartPort worked.
+     * Host-format guest printf. Never enter newlib _vfprintf_r / _svfprintf_r
+     * under a2bus: dual-core smash turns mbtowc into 0x30034280 → HardFault, or
+     * _svfprintf_r spins (CMD BUSY timeout @0x1002DE12) → CP clock line junk.
      */
-    if (pc == USB_GUEST_VFPRINTF_R) {
+    if (pc == USB_GUEST_VFPRINTF_R ||
+        pc == USB_GUEST_SVFPRINTF_R ||
+        pc == USB_GUEST_SVFIPRINTF_R) {
         usb_guest_return_to_lr(0);
         return 1;
     }
@@ -1144,13 +1196,24 @@ static int a2bus_spi_flash_hooks(void) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
+    if (pc == USB_GUEST_DO_GET_TIME_STR || pc == USB_GUEST_DO_GET_TIME_STR_V) {
+        a2bus_host_do_get_time_string();
+        static int gettime_logged;
+        if (!gettime_logged++) {
+            fprintf(stderr, "[A2Bus] DoGetTimeString host-complete\n");
+            fflush(stderr);
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
     if (pc == USB_GUEST_AON_TIMER_GET_CAL) {
         time_t now = a2bus_rtc_now_local();
-        struct tm *t = localtime(&now);
+        /* Match InitRTC: wall time is stored as timezone-adjusted fake UTC. */
+        struct tm *t = gmtime(&now);
         if (t) {
             a2bus_write_tm(cpu.r[0], t);
         }
-        if (!mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
+        if (a2bus_rtc_valid && !mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
             mem_write8(USB_GUEST_RTC_RUNNING_BSS, 1u);
         }
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;

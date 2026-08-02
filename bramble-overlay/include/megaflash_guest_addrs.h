@@ -174,12 +174,16 @@
 #define USB_GUEST_U2_MON_POLL_FLUSH   0x100070b4u /* U2_MonPollFlush */
 #define USB_GUEST_WRAP_VPRINTF      0x1000e2c8u /* __wrap_vprintf */
 #define USB_GUEST_VFPRINTF_R         0x1002f818u /* _vfprintf_r — skip locale/wchar body */
+#define USB_GUEST_SVFPRINTF_R        0x1002d680u /* _svfprintf_r — sprintf path (hangs before _vfprintf_r) */
+#define USB_GUEST_SVFIPRINTF_R       0x1002acd0u /* _svfiprintf_r — integer sprintf variant */
+#define USB_GUEST_DO_GET_TIME_STR    0x10002150u /* DoGetTimeString (CMD_GETTIMESTR) */
+#define USB_GUEST_DO_GET_TIME_STR_V  0x20004728u /* __DoGetTimeString_veneer */
 #define USB_GUEST_LOCALE_MB_CUR_MAX 0x10032838u /* __locale_mb_cur_max — vfprintf locale spin */
 #define USB_GUEST_VFPRINTF_LOOP_BACK  0x1002f818u /* unused on this build; VFPRINTF_R covers path */
 #define USB_GUEST_VFPRINTF_LOOP_EXIT  0x10031aa4u
 #define USB_GUEST_ASCII_MBTOWC      0x10034280u /* __ascii_mbtowc */
 #define USB_GUEST_ASCII_MBTOWC_LOOP 0x1003429cu /* internal bne fallback */
-#define USB_GUEST_VFPRINTF_LO       0x1002f800u
+#define USB_GUEST_VFPRINTF_LO       0x1002d680u /* cover _svfprintf_r .. _vfprintf_r */
 #define USB_GUEST_VFPRINTF_HI       0x10031aa4u
 #define USB_GUEST_USB_CONN_CMP      0x10000498u /* cmp r0,#0 after stdio_usb_connected */
 #define USB_GUEST_USB_CONN_CMP_DBG  0x10000412u /* cbz after stdio_usb_connected (PicoW) */
