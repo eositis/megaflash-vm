@@ -232,35 +232,68 @@ static void a2bus_write_cstr(uint32_t *dest, const char *s) {
 
 /* CP DoTestWifi result: guest IPs + string forms in dataBuffer (DoTestWifi contract). */
 static void a2bus_fill_testwifi_addrs(uint8_t err) {
+    uint32_t i;
+    /*
+     * Zero the full 512-byte dataBuffer first. Prior SmartPort READBLOCK may
+     * leave interleaved junk in the upper page; if transfer mode is wrong,
+     * PrintStringFromDataBuffer then floods the CP with garbage (IP lines).
+     */
+    for (i = 0; i < 512u; i++) {
+        mem_write8(USB_GUEST_DATA_BUFFER + i, 0);
+    }
+
     mem_write8(USB_GUEST_PARAMETER_BUFFER, err);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 1u, 192);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 2u, 168);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 3u, 4);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 4u, 2);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 5u, 255);
+    /* Binary IPs: same layout as firmware memcpy of ip4_addr_t (LE on ARM). */
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 1u, 2);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 2u, 4);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 3u, 168);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 4u, 192);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 5u, 0);
     mem_write8(USB_GUEST_PARAMETER_BUFFER + 6u, 255);
     mem_write8(USB_GUEST_PARAMETER_BUFFER + 7u, 255);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 8u, 0);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 9u, 192);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 10u, 168);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 11u, 4);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 12u, 1);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 13u, 192);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 14u, 168);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 15u, 4);
-    mem_write8(USB_GUEST_PARAMETER_BUFFER + 16u, 1);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 8u, 255);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 9u, 1);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 10u, 4);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 11u, 168);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 12u, 192);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 13u, 1);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 14u, 4);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 15u, 168);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 16u, 192);
 
+    /* Plain ASCII + NUL — FormatIPAddr / PrintStringFromDataBuffer + cputc. */
     uint32_t d = USB_GUEST_DATA_BUFFER;
     a2bus_write_cstr(&d, "192.168.4.2");
     a2bus_write_cstr(&d, "255.255.255.0");
     a2bus_write_cstr(&d, "192.168.4.1");
     a2bus_write_cstr(&d, "192.168.4.1");
 
-    mem_write8(USB_GUEST_DATA_XFER_MODE, 0); /* MODE_LINEAR */
+    mem_write8(USB_GUEST_DATA_XFER_MODE, 0); /* MODE_LINEAR — required for string reads */
     mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
     mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
     mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
     mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
+    {
+        char dump[64];
+        int n = 0;
+        for (i = 0; i < 48u && n < (int)sizeof(dump) - 4; i++) {
+            uint8_t c = mem_read8(USB_GUEST_DATA_BUFFER + i);
+            if (c >= 32 && c < 127) {
+                dump[n++] = (char)c;
+            } else if (c == 0) {
+                dump[n++] = '|';
+            } else {
+                n += snprintf(dump + n, sizeof(dump) - (size_t)n, "\\x%02X", c);
+            }
+        }
+        dump[n] = '\0';
+        fprintf(stderr,
+                "[A2Bus] TestWifi dataBuffer mode=%u idx=%u reg2=0x%02X '%s'\n",
+                (unsigned)mem_read8(USB_GUEST_DATA_XFER_MODE),
+                (unsigned)mem_read32(USB_GUEST_DATA_BUFFER_INDEX),
+                (unsigned)mem_read8(USB_GUEST_REGISTERS + 2u), dump);
+        fflush(stderr);
+    }
 }
 
 #if !defined(_WIN32)

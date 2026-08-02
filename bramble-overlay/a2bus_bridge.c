@@ -525,14 +525,22 @@ static void handle_one(void)
         br.saw_bus_io = 1;
         /* Idle DATA/PARAM/ID/STATUS: host-side side effects (LOAD_CPANEL hot path). */
         if (!host_fast_read(nibble, &data)) {
+            /*
+             * BusLoop presents the *current* register byte on the bus, then
+             * advances for the next read. Return the pre-inject value — the
+             * post-pump peek is the *next* byte and skips characters (CP IP
+             * strings become garbage / zero-flood).
+             */
             data = peek_reg(nibble);
             a2bus_inject_read(nibble & 0xFu);
             pump_guest();
-            data = peek_reg(nibble);
             /* STATUS still BUSY after a full pump → DoCommand hung. */
-            if ((nibble & 0xFu) == 0u && (data & MF_BUSYFLAG) != 0) {
-                a2bus_unstick_busloop("STATUS read still BUSY");
-                data = peek_reg(0);
+            if ((nibble & 0xFu) == 0u) {
+                uint8_t st = peek_reg(0);
+                if ((st & MF_BUSYFLAG) != 0) {
+                    a2bus_unstick_busloop("STATUS read still BUSY");
+                    data = peek_reg(0);
+                }
             }
         }
         break;
