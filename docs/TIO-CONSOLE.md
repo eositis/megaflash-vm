@@ -29,10 +29,12 @@ Leave this terminal running for the whole session.
 
 ## 2. Attach tio
 
-**Terminal 2:**
+**Terminal 2** (quit any existing `screen`/`open-usb-console` session first — only one client):
 
 ```bash
 tio /tmp/bramble-usb-console
+# or, if tio is installed:
+./scripts/open-usb-console-macos.sh   # now prefers tio
 ```
 
 Baud is unused for USB CDC; tio’s default is fine. You should see the MegaFlash banner and:
