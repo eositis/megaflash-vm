@@ -40,8 +40,9 @@ static a2bus_bridge_t br = {
     .saw_bus_io = 0,
     .regs_addr = A2BUS_REGS_DEFAULT,
     .pump = NULL,
-    /* Cap for command completion (BUSY clear). Idle DATA/PARAM use host-side path. */
-    .pump_steps = 200000u,
+    /* Cap while STATUS BUSY: DoTestWifi may sleep-wait on core1 while core0
+     * runs TestWifi (virtual radio). Apple polls BUSY; each poll re-pumps. */
+    .pump_steps = 500000u,
 };
 
 /* MegaFlash BSS (pico2_debug) — keep in sync with megaflash.elf */
@@ -470,14 +471,17 @@ static void pump_guest(void)
         return;
     }
     /*
-     * Core1 only. After a CMD write, BusLoop sets BUSY then clears it when
-     * DoCommand returns. Do not stop early if BUSY was never observed — a short
-     * spin can finish before core1 enters DoCommand, so the Apple reads PARAM
-     * while WE_KEY is already zeroed and treats configbyte1 as 0 (disables
-     * slot‑4 autoboot). Only exit early after seeing BUSY then idle.
+     * Step both cores. Real MegaFlash: core1 BusLoop may block inside DoCommand
+     * (e.g. DoTestWifi sleep-wait) with STATUS BUSY while core0 runs the IPC
+     * work (TestWifi / NTP). Apple waits on BUSY — that is correct hardware
+     * behavior, not a bug. Pumping only core1 starved core0 and forced
+     * host-complete workarounds.
      */
     int seen_busy = (peek_reg(0) & MF_BUSYFLAG) != 0;
     for (unsigned i = 0; i < br.pump_steps; i++) {
+        if (!cpu_is_halted_core(CORE0)) {
+            cpu_step_core(CORE0);
+        }
         if (!cpu_is_halted_core(CORE1)) {
             cpu_step_core(CORE1);
         }

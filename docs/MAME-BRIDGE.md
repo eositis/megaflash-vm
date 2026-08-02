@@ -51,9 +51,9 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP (radio stub → host):** Bramble CYW43 accepts SSID/password and links to a virtual AP (`192.168.4.2/24`). Guest `cyw43_arch` still owns GetNetworkTime control flow (ConnectWifi → NETPUMP → DNS/NTP) with host DNS/SNTP stubs where guest UDP TX is unreliable.
+**Test Wifi / NTP (radio stub → host):** Bramble CYW43 accepts SSID/password and links to a virtual AP (`192.168.4.2/24`). Guest `cyw43_arch` still owns GetNetworkTime / TestWifi control flow (ConnectWifi → NETPUMP → DNS/NTP) with host DNS/SNTP stubs where guest UDP TX is unreliable.
 
-**CP Test Wifi is different:** firmware `DoTestWifi` runs on **core1** and waits on a multicore FIFO for core0 to run `TestWifi()` (up to 90s). That wait **freezes BusLoop**, so MAME locks on “Testing…”. Under a2bus the overlay **host-completes** `DoTestWifi` immediately (virtual IPs + host DNS + host SNTP → guest `rtcRunning` / calendar stubs) and never enters that IPC wait.
+**CP Test Wifi (matches real hardware):** `DoTestWifi` on **core1** sets STATUS **BUSY**, pushes IPC, and sleep-waits while **core0** runs `TestWifi()` (up to 90s). The Apple CP also waits on BUSY — that is normal, not a stuck BusLoop. Firmware then `FormatIPAddr`s into `dataBuffer` for `PrintStringFromDataBuffer`. a2bus must **pump both cores** while BUSY so core0 can service the FIFO; do **not** host-complete `DoTestWifi` or fabricate the status strings.
 
 Bring-up under a2bus:
 
@@ -136,9 +136,9 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **Open-Apple device info:** Hold **Open-Apple** while the Control Panel **starts** (before the main menu appears) — not a numbered menu item. On the real IIc, Open-Apple is the solid-apple key **left** of the space bar (`$C061` / button 0). In MAME that is **Left Option/Alt** by default; the launcher `scripts/mame_cfg/apple2c4.cfg` also accepts **Left ⌘** so the left modifier matches the physical key. That path calls `GetInfoString` → `GetDeviceInfoString`. Native `sprintf(%f)` hangs under Bramble and can leave STATUS BUSY (later actions look like “MegaFlash not available”), so a2bus host-completes `DoGetInfoString`.
 
-**CP Test Wifi IP lines garbled / zero-flood:** `PrintStringFromDataBuffer` reads `$C0C2` until NUL. Causes under a2bus: (1) `dataBuffer` upper page left dirty by SmartPort READBLOCK + interleaved mode → linear string reads pull junk; (2) guest-path DATA READ returned the *post-advance* byte (skipped NULs / chars). a2bus zeros the 512-byte buffer and forces `MODE_LINEAR` in `DoTestWifi` host-complete, and guest-path READ returns the pre-inject register byte.
+**CP Test Wifi IP lines garbled / zero-flood:** was caused by host-completing `DoTestWifi` (wrong approach) plus DATA-path bugs. Correct model: pump both cores while BUSY; let firmware `FormatIPAddr` fill `dataBuffer`. Guest-path DATA READ must return the pre-advance register byte.
 
-**CP bottom-line flicker (cols 32–39):** That is `DisplayTime()` — firmware version (`CMD_GETFIRMWAREVER`) plus clock (`CMD_GETTIMESTR`). `DoGetTimeString` uses `sprintf` → newlib `_svfprintf_r`, which hangs under a2bus (BUSY timeout around `0x1002DE12`). Unstick clears BUSY but leaves PARAM garbage; `cgetc_showclock` redraws it constantly. a2bus host-completes `DoGetTimeString` and stubs `_svfprintf_r` / `_svfiprintf_r` (not only `_vfprintf_r`).
+**CP bottom-line flicker (cols 32–39):** That is `DisplayTime()` — firmware version (`CMD_GETFIRMWAREVER`) plus clock (`CMD_GETTIMESTR`). `DoGetTimeString` uses `sprintf` → newlib `_svfprintf_r`, which hangs under a2bus (BUSY timeout around `0x1002DE12`). That is an emu newlib/sprintf gap (host-complete `DoGetTimeString` / stub `_svfprintf_r`), separate from Test Wifi result strings.
 
 **“Option 7” confusion:** Boot-menu **`7) Control Panel`** loads the CP (`CMD_LOAD_CPANEL`). Inside the IIc CP, the 7th highlighted item is usually **Test Wifi/NTP** (1-based). Test Wifi timeout text is `No response from MegaFlash` — different from boot-menu `MegaFlash Not Found`.
 
