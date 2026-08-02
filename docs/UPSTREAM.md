@@ -17,8 +17,10 @@ When proposing Bramble improvements to Night-Traders / upstream, **do not includ
 
 - `bramble-overlay/` (`a2bus*`, bridge, MegaFlash PC stubs)
 - MAME plugin / launcher / stubs
+- USB CDC console runners (`run-megaflash-usb-console.sh`, connect helpers, XMODEM test scripts)
 - Temporary empty-SSID fail-fast and `BRAMBLE_A2BUS_STUB_WIFI` (debt to delete once EH/BusLoop are solid)
 - Post-radio `.data` restore + deferred BusLoop launch (MegaFlash RAM layout)
 - MegaFlash firmware, `iic.bin`, SPI volume images
 
-Stock `../Bramble` builds without Apple code. The MAME path uses this repo’s overlay binary.
+Stock `../Bramble` builds without Apple code. The MAME path uses this repo’s overlay binary. USB console uses `-usb-console` from Bramble plus this repo’s firmware/flash assets.
+
