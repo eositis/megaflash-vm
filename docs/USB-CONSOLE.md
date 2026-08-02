@@ -44,10 +44,11 @@ Wait for:
 
 | Program | How to connect |
 |---------|----------------|
-| **Terminal.app** (new window) | `./scripts/open-usb-console-macos.sh` |
-| **screen** / **cu** | `./scripts/connect-usb-console.sh` or `screen /tmp/bramble-usb-console 115200` |
+| **Terminal.app** (new window) | `./scripts/open-usb-console-macos.sh` (prefers **tio** if installed — needed for XMODEM; else screen) |
+| **tio** (recommended for XMODEM) | `tio /tmp/bramble-usb-console` — see [TIO-CONSOLE.md](TIO-CONSOLE.md) (`Ctrl-T` then `x`) |
+| **screen** / **cu** | `./scripts/connect-usb-console.sh` or `screen /tmp/bramble-usb-console 115200` (screen has **no** XMODEM send) |
 | **Serial.app**, **CoolTerm**, etc. | Pick `/dev/ttysNNN` from the port list (path printed in Bramble stderr), or open symlink `/tmp/bramble-usb-console` if the app allows custom paths. Baud: **115200** (ignored by CDC). |
-| **iTerm2** | Same as Terminal: `screen /tmp/bramble-usb-console 115200` |
+| **iTerm2** | `tio /tmp/bramble-usb-console` or `screen …` |
 
 Bramble must stay running in Terminal 1 while you use the serial port. If connect says `PTY not found`, Bramble is not running or exited (e.g. timeout).
 
