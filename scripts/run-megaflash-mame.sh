@@ -186,8 +186,8 @@ PY
   fi
 fi
 
-# MegaFlash Test Wifi / NTP use real CYW43 + hostif (-wifi -tap) so DNS/time
-# diagnostics hit the network. Pass NO_WIFI=1 to disable radio; NO_HOST_NET=1
+# MegaFlash Test Wifi / NTP use real CYW43 + hostif (-wifi -tap): guest lwIP
+# DHCP/DNS/NTP/TFTP through the radio. Pass NO_WIFI=1 to disable radio; NO_HOST_NET=1
 # for -wifi only (no utun/pf); BRAMBLE_A2BUS_STUB_WIFI=1 to stub cyw43_arch_init.
 WIFI_ARGS=()
 HOST_NET=0

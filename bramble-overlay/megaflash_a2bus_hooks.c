@@ -1,9 +1,8 @@
 /*
- * MegaFlash a2bus guest hooks: Apple-bus / SPI / bring-up, plus thin host
- * stubs where guest UDP TX is unreliable (DNS/NTP). Radio JOIN + DHCP go
- * through Bramble CYW43 (SSID/PW → fake DHCP lease 192.168.4.2 into guest
- * lwIP netif). Do not poke netif IPs or host-complete DoTestWifi strings —
- * firmware FormatIPAddr owns the CP display path.
+ * MegaFlash a2bus guest hooks: Apple-bus / SPI / bring-up.
+ * Radio JOIN + all IP (DHCP/DNS/NTP/TFTP) go through guest lwIP → CYW43 gSPI
+ * → Bramble cyw43.c (fake DHCP + optional TAP/utun). Do not host-complete
+ * DNS/NTP or poke netif leases — that faked OK while packets never flowed.
  */
 #include "a2bus_bridge.h"
 #include "bramble_ext.h"
@@ -19,91 +18,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <time.h>
-#if !defined(_WIN32)
-#include <arpa/inet.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <sys/time.h>
-#include <unistd.h>
-#endif
 
-/* CNTPTask layout (MegaFlash firmware): CUDPTask then attempt @0x58, time_t @0x60. */
-#define A2BUS_CNTP_ATTEMPT_OFF      0x58u
-#define A2BUS_CNTP_EPOCH_OFF        0x60u
-#define A2BUS_CUDP_SERVER_ADDR_OFF  0x18u
-#define A2BUS_CUDP_COMPLETED_OFF    0x4cu
-#define A2BUS_NTP_DELTA             2208988800ull
-#define A2BUS_SEND_NTP_REQUEST      0x1000918cu
-
-#if !defined(_WIN32)
-/* Host UDP SNTP; returns unix seconds or 0 on failure. */
-static uint64_t a2bus_host_sntp(uint32_t server_ip_le) {
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        return 0;
-    }
-    struct timeval tv;
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    struct sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(123);
-    sa.sin_addr.s_addr = server_ip_le; /* guest stores network-order IPv4 */
-
-    uint8_t req[48];
-    memset(req, 0, sizeof(req));
-    req[0] = 0x23; /* LI=0 VN=4 Mode=3 (client) */
-    if (sendto(fd, req, sizeof(req), 0, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        close(fd);
-        return 0;
-    }
-    uint8_t resp[48];
-    ssize_t n = recvfrom(fd, resp, sizeof(resp), 0, NULL, NULL);
-    close(fd);
-    if (n < 48 || (resp[0] & 0x7) != 4 || resp[1] == 0) {
-        return 0;
-    }
-    uint32_t sec1900 = ((uint32_t)resp[40] << 24) | ((uint32_t)resp[41] << 16) |
-                       ((uint32_t)resp[42] << 8) | (uint32_t)resp[43];
-    if (sec1900 < 3955046400u) {
-        return (uint64_t)sec1900 + 0x100000000ull - A2BUS_NTP_DELTA;
-    }
-    return (uint64_t)sec1900 - A2BUS_NTP_DELTA;
-}
-#endif
-
-static void a2bus_complete_ntp_on_host(uint32_t task) {
-    uint64_t epoch = 0;
-#if !defined(_WIN32)
-    uint32_t sip = mem_read32(task + A2BUS_CUDP_SERVER_ADDR_OFF);
-    if (sip != 0u) {
-        epoch = a2bus_host_sntp(sip);
-    }
-#endif
-    if (epoch == 0) {
-        epoch = (uint64_t)time(NULL);
-        fprintf(stderr, "[A2Bus] host NTP fallback to local time\n");
-    }
-    mem_write32(task + A2BUS_CNTP_EPOCH_OFF, (uint32_t)(epoch & 0xffffffffu));
-    mem_write32(task + A2BUS_CNTP_EPOCH_OFF + 4u, (uint32_t)(epoch >> 32));
-    mem_write8(task + A2BUS_CUDP_COMPLETED_OFF, 1u);
-    {
-        uint32_t attempt = mem_read32(task + A2BUS_CNTP_ATTEMPT_OFF);
-        mem_write32(task + A2BUS_CNTP_ATTEMPT_OFF, attempt + 1u);
-    }
-    fprintf(stderr, "[A2Bus] host NTP unix epoch = %llu\n",
-            (unsigned long long)epoch);
-}
-
-
-
+/* CNTPTask / InitRTC helpers still use guest calendar; NTP packets use CYW43. */
 
 static int a2bus_wifi_hooks(void);
 static int a2bus_spi_flash_hooks(void);
@@ -471,63 +387,8 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
-    /* Host DNS — guest UDP TX pbufs are unreliable; resolve on host (ERR_OK). */
-    if (pc == 0x100131b0u || pc == 0x1001322cu) { /* dns_gethostbyname[_addrtype] */
-        uint32_t host_p = cpu.r[0];
-        uint32_t addr_p = cpu.r[1];
-        char host[256];
-        uint32_t i;
-        if (host_p == 0u || addr_p == 0u) {
-            cpu.r[0] = 0xfffffff0u; /* ERR_ARG */
-            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-            return 1;
-        }
-        for (i = 0; i < sizeof(host) - 1u; i++) {
-            uint8_t c = mem_read8(host_p + i);
-            host[i] = (char)c;
-            if (c == 0) {
-                break;
-            }
-        }
-        host[sizeof(host) - 1u] = '\0';
-#if !defined(_WIN32)
-        {
-            struct addrinfo hints, *res = NULL;
-            memset(&hints, 0, sizeof(hints));
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_DGRAM;
-            if (getaddrinfo(host, NULL, &hints, &res) == 0 && res != NULL) {
-                struct sockaddr_in *sin = (struct sockaddr_in *)res->ai_addr;
-                uint32_t ip = (uint32_t)sin->sin_addr.s_addr;
-                mem_write32(addr_p, ip);
-                freeaddrinfo(res);
-                fprintf(stderr, "[A2Bus] host DNS '%s' → %u.%u.%u.%u\n", host,
-                        (unsigned)(ip & 0xffu), (unsigned)((ip >> 8) & 0xffu),
-                        (unsigned)((ip >> 16) & 0xffu), (unsigned)((ip >> 24) & 0xffu));
-                cpu.r[0] = 0; /* ERR_OK */
-                cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-                return 1;
-            }
-            fprintf(stderr, "[A2Bus] host DNS failed for '%s'\n", host);
-        }
-#endif
-        cpu.r[0] = 0xfffffff0u; /* ERR_ARG */
-        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-        return 1;
-    }
-
-    /* Host NTP — guest UDP TX still broken after DNS; SNTP on host socket. */
-    if (pc == A2BUS_SEND_NTP_REQUEST) {
-        uint32_t task = cpu.r[0];
-        uint8_t resolved = mem_read8(task + 0x1cu); /* serverIpResolved */
-        if (!resolved) {
-            return 0; /* let guest assert path run */
-        }
-        fprintf(stderr, "[A2Bus] Sending NTP Request (host SNTP)\n");
-        a2bus_complete_ntp_on_host(task);
-        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-        return 1;
-    }
+    /* DNS / NTP go through guest lwIP → CYW43 WLAN → Bramble fake DHCP / TAP.
+     * Do not host-complete dns_gethostbyname or SendNTPRequest. */
 
     if (pc == USB_GUEST_MUTEX_ENTER_VENEER || pc == USB_GUEST_MUTEX_EXIT_VENEER ||
         pc == USB_GUEST_MUTEX_ENTER_V || pc == USB_GUEST_MUTEX_EXIT_V) {
@@ -805,12 +666,15 @@ static int a2bus_spi_flash_hooks(void) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
-    /* Soft-continue lwIP TX ref assert only when pbuf is non-NULL; NULL p
-     * means alloc failed — returning ERR_BUF without parking is fine. */
+    /* Soft-continue only the TX single-pbuf assert by retrying with ref fixed.
+     * Never return ERR_BUF here — that aborted DHCP and left LINK_NOIP forever.
+     * Never soft-continue pbuf_free into memp_free — that corrupted the heap
+     * (HardFault PC looked like ASCII, e.g. "Runt"). */
     if (pc == USB_GUEST_PANIC) {
         uint32_t msg = cpu.r[0];
         uint32_t lr = cpu.r[14] & ~1u;
-        if (lr == 0x1001ab10u || lr == 0x1001ab16u) {
+        if (lr == 0x1001ab10u || lr == 0x1001ab16u || lr == 0x1001ab0eu ||
+            lr == 0x1001ab12u) {
             char buf[40];
             uint32_t i;
             for (i = 0; i < sizeof(buf) - 1u && msg; i++) {
@@ -821,29 +685,27 @@ static int a2bus_spi_flash_hooks(void) {
                 buf[i] = (char)ch;
             }
             buf[i] = '\0';
-            if (strncmp(buf, "p->ref == 1", 11) == 0 ||
-                strncmp(buf, "check that first pbuf", 21) == 0) {
-                static int soft;
-                if (soft < 5) {
-                    soft++;
-                    fprintf(stderr,
-                            "[A2Bus] soft-continue lwIP TX assert '%s'\n", buf);
-                }
-                cpu.r[0] = 0xffffffffu; /* ERR_BUF */
-                cpu.r[15] = 0x1001ab04u | 1u;
-                return 1;
+            if (strncmp(buf, "p->ref == 1", 11) == 0) {
+                /* p was in r0 at assert; panic clobbered r0 with msg. r4 not
+                 * set yet. Cannot recover — should have been skipped in cpu.c.
+                 * Fall through to real panic log once. */
             }
         }
-        if (lr == 0x10013a70u || lr == 0x10013956u || lr == 0x10013a76u) {
-            /* pbuf_free / pbuf_add_header null or ref asserts — soft continue */
-            static int nullp;
-            if (nullp < 8) {
-                nullp++;
-                fprintf(stderr, "[A2Bus] soft-continue pbuf assert lr=0x%08X\n", lr);
+        if (lr == 0x10013a76u) {
+            /* pbuf_free: ref was 0. r5 still holds p. Restore ref and retry. */
+            uint32_t p = cpu.r[5];
+            if (p != 0u) {
+                mem_write8(p + 14u, 1u);
+                static int fixed;
+                if (fixed < 8) {
+                    fixed++;
+                    fprintf(stderr,
+                            "[A2Bus] pbuf_free: restored ref on 0x%08X, retry\n",
+                            p);
+                }
+                cpu.r[15] = 0x10013a84u | 1u;
+                return 1;
             }
-            cpu.r[0] = 0;
-            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-            return 1;
         }
         static int panic_logged;
         if (!panic_logged++) {
