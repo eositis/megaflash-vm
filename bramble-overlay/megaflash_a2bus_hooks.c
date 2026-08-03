@@ -1,8 +1,9 @@
 /*
  * MegaFlash a2bus guest hooks: Apple-bus / SPI / bring-up, plus thin host
- * stubs where guest UDP TX is unreliable (DNS/NTP) and where WFI wall-clock
- * races the guest wifi_connect deadline. Radio JOIN still goes through
- * Bramble CYW43 (SSID/PW → virtual AP lease 192.168.4.2).
+ * stubs where guest UDP TX is unreliable (DNS/NTP). Radio JOIN + DHCP go
+ * through Bramble CYW43 (SSID/PW → fake DHCP lease 192.168.4.2 into guest
+ * lwIP netif). Do not poke netif IPs or host-complete DoTestWifi strings —
+ * firmware FormatIPAddr owns the CP display path.
  */
 #include "a2bus_bridge.h"
 #include "bramble_ext.h"
@@ -216,8 +217,6 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 /* Unlocked mutex owner = -1; spinlock slot in guest SRAM for [0]. */
 static uint32_t a2bus_mutex_spinlock_byte = 0x20061f00u;
 
-static void a2bus_assign_stub_ap_lease(uint32_t netif);
-
 /* Guest AON RTC: CP clock / ProDOS read calendar via aon_timer after InitRTC. */
 static int a2bus_rtc_valid;
 static time_t a2bus_rtc_base_local;
@@ -428,22 +427,6 @@ static void a2bus_ensure_busloop_core1(void) {
     sio_force_core1_launch(0x20000120u, 0x20081000u, 0);
 }
 
-static void a2bus_assign_stub_ap_lease(uint32_t netif) {
-    if (netif == 0u) {
-        return;
-    }
-    mem_write32(netif + 4u, 0x0204a8c0u);  /* 192.168.4.2 */
-    mem_write32(netif + 8u, 0x00ffffffu);  /* 255.255.255.0 */
-    mem_write32(netif + 12u, 0x0104a8c0u); /* 192.168.4.1 */
-    mem_write32(0x2000cd74u, 0x0104a8c0u); /* dns_servers[0] */
-    mem_write8(netif + 0x39u, (uint8_t)(mem_read8(netif + 0x39u) | 0x05u));
-    static int once;
-    if (!once++) {
-        fprintf(stderr,
-                "[A2Bus] stub AP lease: 192.168.4.2/24 gw/dns 192.168.4.1\n");
-    }
-}
-
 static int a2bus_wifi_hooks(void) {
     if (!a2bus_bridge_active() || !cyw43.enabled) {
         return 0;
@@ -470,53 +453,20 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
-    /* Skip guest DHCP TX (pbuf_alloc often yields NULL under emu). After JOIN,
-     * give the same lease the stub CYW43 AP / fake DHCP would. */
-    if (pc == 0x10019484u || pc == 0x10018a7cu || pc == 0x10019230u) {
-        /* dhcp_start / dhcp_discover / dhcp_network_changed_link_up */
-        if (cyw43.wifi_state == CYW43_WIFI_CONNECTED) {
-            a2bus_assign_stub_ap_lease(cpu.r[0]);
-            cpu.r[0] = 0;
-            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-            return 1;
-        }
+    /*
+     * wifi_connect_timeout_ms polls with cyw43_arch_wait_for_work_until.
+     * Under a2bus that WFIs on wall-clock TIMER and can burn the 15s guest
+     * deadline before JOIN events + DHCP ACK are processed. Return immediately
+     * so the poll loop can drain CYW43 RX (connect events + fake DHCP).
+     * Lease still comes from guest dhcp_start → Bramble fake DHCP → lwIP netif.
+     */
+    if (pc == 0x1001afd4u) { /* cyw43_arch_wait_for_work_until */
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
     }
 
-    /* WFI wall-clock TIMER expires the 15s guest connect deadline mid-JOIN
-     * (link hits status 3, then function still returns -2). CYW43 is a host
-     * radio stub: accept SSID/PW, assign the virtual lease, return success. */
-    if (pc == 0x100086b8u) { /* wifi_connect_timeout_ms */
-        uint32_t ssid_p = cpu.r[0];
-        uint32_t key_p = cpu.r[1];
-        char ssid[CYW43_MAX_SSID_LEN + 1];
-        uint32_t i;
-        if (ssid_p == 0u || mem_read8(ssid_p) == 0u) {
-            return 0; /* empty SSID — let guest throw ERR_SSIDNOTSET upstream */
-        }
-        for (i = 0; i < CYW43_MAX_SSID_LEN; i++) {
-            uint8_t c = mem_read8(ssid_p + i);
-            ssid[i] = (char)c;
-            if (c == 0) {
-                break;
-            }
-        }
-        ssid[CYW43_MAX_SSID_LEN] = '\0';
-        memcpy(cyw43.connected_ssid, ssid, sizeof(cyw43.connected_ssid));
-        cyw43.wifi_state = CYW43_WIFI_CONNECTED;
-        if (key_p != 0u && mem_read8(key_p) != 0u) {
-            cyw43.password_provided = 1;
-        }
-        /* cyw43_state.netif[STA]: IP @+0x8d8, flags @+0x90d */
-        a2bus_assign_stub_ap_lease(0x2000c13cu + 0x8d4u);
-        {
-            static int once;
-            if (!once++) {
-                fprintf(stderr,
-                        "[A2Bus] wifi_connect_timeout_ms → 0 (host stub JOIN '%s')\n",
-                        cyw43.connected_ssid);
-            }
-        }
-        cpu.r[0] = 0;
+    /* Guest lwIP DHCP_OPTIONS_LEN=68; long hostname fills the buffer. */
+    if (pc == 0x100185f0u) { /* dhcp_option_hostname */
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
@@ -575,12 +525,6 @@ static int a2bus_wifi_hooks(void) {
         }
         fprintf(stderr, "[A2Bus] Sending NTP Request (host SNTP)\n");
         a2bus_complete_ntp_on_host(task);
-        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-        return 1;
-    }
-
-    /* Guest lwIP DHCP_OPTIONS_LEN=68; long hostname fills the buffer. */
-    if (pc == 0x100185f0u) { /* dhcp_option_hostname */
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }

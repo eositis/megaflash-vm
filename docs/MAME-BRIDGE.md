@@ -51,9 +51,9 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP (radio stub → host):** Bramble CYW43 accepts SSID/password and links to a virtual AP (`192.168.4.2/24`). Guest `cyw43_arch` still owns GetNetworkTime / TestWifi control flow (ConnectWifi → NETPUMP → DNS/NTP) with host DNS/SNTP stubs where guest UDP TX is unreliable.
+**Test Wifi / NTP (radio stub → guest lwIP):** Bramble CYW43 accepts SSID/password, queues JOIN events, and answers DHCP (`192.168.4.2/24`). Guest `cyw43_arch` owns ConnectWifi → DHCP → netif; host DNS/SNTP stubs remain where guest UDP TX is unreliable. Do **not** poke netif IPs or fabricate CP result strings.
 
-**CP Test Wifi (matches real hardware):** `DoTestWifi` on **core1** sets STATUS **BUSY**, pushes IPC, and sleep-waits while **core0** runs `TestWifi()` (up to 90s). The Apple CP also waits on BUSY — that is normal, not a stuck BusLoop. Firmware then `FormatIPAddr`s into `dataBuffer` for `PrintStringFromDataBuffer`. a2bus must **pump both cores** while BUSY so core0 can service the FIFO; do **not** host-complete `DoTestWifi` or fabricate the status strings.
+**CP Test Wifi (matches real hardware):** `DoTestWifi` on **core1** sets STATUS **BUSY**, pushes IPC, and sleep-waits while **core0** runs `TestWifi()` (up to 90s). The Apple CP also waits on BUSY — that is normal, not a stuck BusLoop. Firmware `EvtStart` copies netif/DNS into `testResult`, then `FormatIPAddr` fills `dataBuffer` for `PrintStringFromDataBuffer`. a2bus must **pump both cores** while BUSY; host-complete `DoTestWifi` is wrong. Empty IP lines with WIFI/DNS/NTP **OK** usually means `FormatIPAddr`/`strcpy` failed under emu (NETERR is independent of the string buffer).
 
 Bring-up under a2bus:
 
@@ -62,7 +62,7 @@ Bring-up under a2bus:
 3. Guest timers track host wall time while a core is in WFI/WFE (so `sleep_until` during radio bring-up is not starved by BusLoop).
 4. Empty SSID still fails fast (`NETERR_SSIDNOTSET`) — C++ EH gap, not radio policy.
 5. `BRAMBLE_A2BUS_STUB_WIFI=1` — emergency stub of `cyw43_arch_init` only (WIP debt, not the product path).
-6. `wifi_connect_timeout_ms` host stub JOIN + static lease when core0 does run ConnectWifi (WFI wall-clock races the 15s guest deadline).
+6. `cyw43_arch_wait_for_work_until` returns immediately under a2bus so the 15s `wifi_connect` poll can drain JOIN events + fake DHCP without wall-clock WFI burning the deadline.
 
 On **macOS**, the launcher uses `sudo -A` with `scripts/macos-sudo-askpass.sh` so you get a **GUI admin dialog** once: enable pf NAT for `192.168.4.0/24`, then start Bramble as root for utun. Approve that dialog, wait for BusLoop ready, then MAME starts.
 
@@ -137,6 +137,8 @@ Control-panel **Save** must not run real SPI security-register programming under
 **Open-Apple device info:** Hold **Open-Apple** while the Control Panel **starts** (before the main menu appears) — not a numbered menu item. On the real IIc, Open-Apple is the solid-apple key **left** of the space bar (`$C061` / button 0). In MAME that is **Left Option/Alt** by default; the launcher `scripts/mame_cfg/apple2c4.cfg` also accepts **Left ⌘** so the left modifier matches the physical key. That path calls `GetInfoString` → `GetDeviceInfoString`. Native `sprintf(%f)` hangs under Bramble and can leave STATUS BUSY (later actions look like “MegaFlash not available”), so a2bus host-completes `DoGetInfoString`.
 
 **CP Test Wifi IP lines garbled / zero-flood:** was caused by host-completing `DoTestWifi` (wrong approach) plus DATA-path bugs. Correct model: pump both cores while BUSY; let firmware `FormatIPAddr` fill `dataBuffer`. Guest-path DATA READ must return the pre-advance register byte.
+
+**CP Test Wifi OK but IP fields empty / “AG” junk:** `parameterBuffer[0]==NETERR_NONE` is independent of the IP strings. Empty lines mean `dataBuffer` never got `FormatIPAddr` text — often newlib `strcpy` under Thumb emu, or netif never received a lease. Fix: host `strcpy` accel; lease via CYW43 fake DHCP into guest lwIP (not netif poke / DHCP skip).
 
 **CP bottom-line flicker (cols 32–39):** That is `DisplayTime()` — firmware version (`CMD_GETFIRMWAREVER`) plus clock (`CMD_GETTIMESTR`). `DoGetTimeString` uses `sprintf` → newlib `_svfprintf_r`, which hangs under a2bus (BUSY timeout around `0x1002DE12`). That is an emu newlib/sprintf gap (host-complete `DoGetTimeString` / stub `_svfprintf_r`), separate from Test Wifi result strings.
 
