@@ -666,31 +666,36 @@ static int a2bus_spi_flash_hooks(void) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
-    /* Soft-continue only the TX single-pbuf assert by retrying with ref fixed.
-     * Never return ERR_BUF here — that aborted DHCP and left LINK_NOIP forever.
-     * Never soft-continue pbuf_free into memp_free — that corrupted the heap
-     * (HardFault PC looked like ASCII, e.g. "Runt"). */
+    /* Debug-build lwIP asserts that release would soft-fail. Recover so core0
+     * keeps running NETPUMP / DHCP instead of LOCKUP. */
     if (pc == USB_GUEST_PANIC) {
         uint32_t msg = cpu.r[0];
         uint32_t lr = cpu.r[14] & ~1u;
-        if (lr == 0x1001ab10u || lr == 0x1001ab16u || lr == 0x1001ab0eu ||
-            lr == 0x1001ab12u) {
-            char buf[40];
-            uint32_t i;
-            for (i = 0; i < sizeof(buf) - 1u && msg; i++) {
-                uint8_t ch = mem_read8(msg + i);
-                if (!ch) {
-                    break;
-                }
-                buf[i] = (char)ch;
+        char buf[48];
+        uint32_t i;
+        for (i = 0; i < sizeof(buf) - 1u && msg; i++) {
+            uint8_t ch = mem_read8(msg + i);
+            if (!ch) {
+                break;
             }
-            buf[i] = '\0';
-            if (strncmp(buf, "p->ref == 1", 11) == 0) {
-                /* p was in r0 at assert; panic clobbered r0 with msg. r4 not
-                 * set yet. Cannot recover — should have been skipped in cpu.c.
-                 * Fall through to real panic log once. */
-            }
+            buf[i] = (char)ch;
         }
+        buf[i] = '\0';
+
+        /* pbuf_add_header_impl(NULL): debug assert before "return 1". Unwind. */
+        if (lr == 0x10013958u && strncmp(buf, "p != NULL", 9) == 0) {
+            uint32_t saved_lr = mem_read32(cpu.r[13] + 4u);
+            cpu.r[13] += 8u; /* pop {r3, lr} */
+            cpu.r[0] = 1u;   /* failure, same as release build */
+            cpu.r[15] = saved_lr | 1u;
+            static int once;
+            if (!once++) {
+                fprintf(stderr,
+                        "[A2Bus] pbuf_add_header(NULL) → fail (debug assert)\n");
+            }
+            return 1;
+        }
+
         if (lr == 0x10013a76u) {
             /* pbuf_free: ref was 0. r5 still holds p. Restore ref and retry. */
             uint32_t p = cpu.r[5];
@@ -707,22 +712,22 @@ static int a2bus_spi_flash_hooks(void) {
                 return 1;
             }
         }
+
         static int panic_logged;
-        if (!panic_logged++) {
-            fprintf(stderr, "[A2Bus] guest panic: ");
-            if (msg) {
-                for (uint32_t i = 0; i < 200u; i++) {
-                    uint8_t ch = mem_read8(msg + i);
-                    if (ch == 0) {
-                        break;
-                    }
-                    fputc((int)ch, stderr);
-                }
-            }
-            fprintf(stderr, " (sio_core=%u lr=0x%08X)\n",
+        if (panic_logged < 8) {
+            panic_logged++;
+            fprintf(stderr, "[A2Bus] guest panic: %s (sio_core=%u lr=0x%08X)\n",
+                    buf[0] ? buf : "(null)",
                     (unsigned)sio_get_core_id(), cpu.r[14]);
+            fflush(stderr);
         }
-        cpu.r[15] = USB_GUEST_PANIC | 1u;
+        /* Do not re-enter panic (LOCKUP). Mark this core WFI so the peer can run. */
+        {
+            unsigned c = sio_get_core_id();
+            if (c < 2u) {
+                cores[c].is_wfi = 1;
+            }
+        }
         return 1;
     }
     /* Belt-and-suspenders: core0 may still be stuck pre-main while core1
