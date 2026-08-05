@@ -138,7 +138,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi IP lines garbled / zero-flood:** was caused by host-completing `DoTestWifi` (wrong approach) plus DATA-path bugs. Correct model: pump both cores while BUSY; let firmware `FormatIPAddr` fill `dataBuffer`. Guest-path DATA READ must return the pre-advance register byte.
 
-**CP Test Wifi OK but IP fields empty / “AG” junk:** `parameterBuffer[0]==NETERR_NONE` is independent of the IP strings. Empty lines mean `dataBuffer` never got `FormatIPAddr` text — often newlib `strcpy` under Thumb emu, or netif never received a lease. Fix: host `strcpy` accel; lease via CYW43 fake DHCP into guest lwIP (not netif poke / DHCP skip).
+**CP Test Wifi OK but IP fields empty / “AG” junk:** `parameterBuffer[0]==NETERR_NONE` is independent of the IP strings. Empty lines mean `dataBuffer` never got `FormatIPAddr` text — often guest `ip4addr_ntoa`/`strcpy` under Thumb emu (even when host `strcpy` accel exists, FormatIPAddr may not reach it cleanly), or netif never received a lease. Fix: host-accel entire `FormatIPAddr` from the netif IP word; lease via CYW43 fake DHCP into guest lwIP (not netif poke / DHCP skip). Guest `_exit` (abort after Abort Requested) is parked in WFI so core0 does not LOCKUP.
 
 **CP bottom-line flicker (cols 32–39):** That is `DisplayTime()` — firmware version (`CMD_GETFIRMWAREVER`) plus clock (`CMD_GETTIMESTR`). `DoGetTimeString` uses `sprintf` → newlib `_svfprintf_r`, which hangs under a2bus (BUSY timeout around `0x1002DE12`). That is an emu newlib/sprintf gap (host-complete `DoGetTimeString` / stub `_svfprintf_r`), separate from Test Wifi result strings.
 
