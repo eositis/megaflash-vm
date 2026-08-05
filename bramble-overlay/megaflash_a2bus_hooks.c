@@ -696,6 +696,23 @@ static int a2bus_spi_flash_hooks(void) {
             return 1;
         }
 
+        /* pbuf_free(NULL): release build no-ops; debug panics. */
+        if (lr == 0x10013a71u && strncmp(buf, "p != NULL", 9) == 0) {
+            uint32_t sp = cpu.r[13];
+            uint32_t ret = mem_read32(sp + 12u);
+            cpu.r[4] = mem_read32(sp + 0u);
+            cpu.r[5] = mem_read32(sp + 4u);
+            cpu.r[6] = mem_read32(sp + 8u);
+            cpu.r[13] = sp + 16u;
+            cpu.r[0] = 0u;
+            cpu.r[15] = ret | 1u;
+            static int once;
+            if (!once++) {
+                fprintf(stderr, "[A2Bus] pbuf_free(NULL) → 0 (debug assert)\n");
+            }
+            return 1;
+        }
+
         if (lr == 0x10013a76u) {
             /* pbuf_free: ref was 0. r5 still holds p. Restore ref and retry. */
             uint32_t p = cpu.r[5];
