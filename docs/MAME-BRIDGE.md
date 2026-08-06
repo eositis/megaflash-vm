@@ -153,7 +153,12 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **TFTP Status HardFault (`PC=0x546E7552` / `"RunT…"`) after DoTFTPRun:** native `DoTFTPStatus` (critical_section ldaexb + Format*/sprintf) corrupts core1 PC. Host-complete `DoTFTPStatus` from live `tftp_state` (parameterBuffer + five dataBuffer strings). Do not wrap Status in `long_cmd` — Status is polled continuously and starved core0.
 
-**TFTP stuck at Status=`Starting` (no TAP UDP :69):** `RunTFTP` prints then `DebugPrintHeapState` → newlib `mallinfo` freelist walk hangs under Thumb emu (`PC≈0x1002ABAA`). Skip `__malloc_update_mallinfo`; stub `DebugPrintHeapState`. Guest lwIP then continues to RRQ → CYW43 → TAP UDP NAT (same path as DNS/NTP).
+**TFTP stuck at Status=`Starting` (no TAP UDP :69):** Two causes under a2bus:
+
+1. `DebugPrintHeapState` → newlib `mallinfo` freelist walk hangs (`PC≈0x1002ABAA`). Skip `__malloc_update_mallinfo`; stub `DebugPrintHeapState`.
+2. `CTFTPTask` ctor → `UpdateTFTPState` → `tftp_critical_section_enter_blocking` spins when `tftp_cs.spin_lock` is null/out of the ldaexb force-free range (status never leaves STARTING). Host-complete tftp CS enter/exit; ensure a valid spin-lock byte; fix `hw_claim_unused` to scan free bits (was always returning the range start).
+
+Guest lwIP then continues to RRQ → CYW43 → TAP UDP NAT (same path as DNS/NTP).
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel). Also appears when BusLoop HardFaulted after TestWifi — Status never refreshed.
 

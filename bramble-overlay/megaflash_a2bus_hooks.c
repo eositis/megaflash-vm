@@ -142,10 +142,20 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_MALLOC_MUTEX        0x20005164u /* malloc_mutex (.data, often still zero) */
 #define USB_GUEST_MUTEX_ENTER_VENEER  0x10034da0u /* __mutex_enter_blocking_veneer */
 #define USB_GUEST_MUTEX_EXIT_VENEER   0x10034d70u /* __mutex_exit_veneer */
+#define USB_GUEST_TFTP_CS             0x200580bcu /* tftp_cs critical_section_t */
+#define USB_GUEST_TFTP_CS_ENTER_V     0x10034d20u /* __tftp_critical_section_enter_blocking_veneer */
+#define USB_GUEST_TFTP_CS_EXIT_V      0x10034d98u /* __tftp_critical_section_exit_veneer */
+#define USB_GUEST_TFTP_CS_ENTER       0x20001fa8u /* tftp_critical_section_enter_blocking (RAM) */
+#define USB_GUEST_TFTP_CS_EXIT        0x20001fd4u /* tftp_critical_section_exit (RAM) */
 #define USB_GUEST_INIT_RTC            0x10004accu /* InitRTC — track epoch for CP clock */
+#define USB_GUEST_CTFTPRX_EVTSTART    0x10009ffcu /* CTFTPRXTask::EvtStart */
+#define USB_GUEST_CTFTPRX_STARTXFER   0x10009a28u /* CTFTPRXTask::StartTransfer */
+#define USB_GUEST_RUNTFTP_AFTER_HEAP  0x10001002u /* RunTFTP: cbz r6 (dir) after DebugPrintHeap */
 
 /* Unlocked mutex owner = -1; spinlock slot in guest SRAM for [0]. */
 static uint32_t a2bus_mutex_spinlock_byte = 0x20061f00u;
+/* Dedicated spin-lock byte for tftp_cs if guest pointer is null/corrupt. */
+static uint32_t a2bus_tftp_cs_spinlock_byte = 0x20061f01u;
 
 /* Guest AON RTC: CP clock / ProDOS read calendar via aon_timer after InitRTC. */
 static int a2bus_rtc_valid;
@@ -543,9 +553,10 @@ static int a2bus_stub_cyw43(void) {
 
 static void a2bus_ensure_malloc_mutex(void) {
     static int ready;
-    if (ready++) {
+    if (ready) {
         return;
     }
+    ready = 1;
     if (mem_read32(USB_GUEST_MALLOC_MUTEX) == 0u) {
         mem_write32(USB_GUEST_MALLOC_MUTEX, a2bus_mutex_spinlock_byte);
         mem_write8(a2bus_mutex_spinlock_byte, 0);
@@ -553,6 +564,39 @@ static void a2bus_ensure_malloc_mutex(void) {
     mem_write8(USB_GUEST_MALLOC_MUTEX + 4u, 0xFFu);
     mem_write8(USB_GUEST_STDIO_MUTEX + 4u, 0xFFu);
     fprintf(stderr, "[A2Bus] malloc_mutex unlocked (owner=-1)\n");
+}
+
+/*
+ * UpdateTFTPState / EvtStart / StartTransfer all take tftp_cs. Under a2bus the
+ * guest spin_lock pointer can be null or outside the ldaexb force-free range,
+ * so enter_blocking spins forever and status stays TFTPSTATUS_STARTING (no
+ * UDP :69). Host-complete enter/exit — status updates still run natively.
+ */
+static void a2bus_ensure_tftp_cs(void) {
+    uint32_t lock = mem_read32(USB_GUEST_TFTP_CS);
+    if (lock < 0x2000b794u || lock >= 0x2000b794u + 32u) {
+        mem_write32(USB_GUEST_TFTP_CS, a2bus_tftp_cs_spinlock_byte);
+        lock = a2bus_tftp_cs_spinlock_byte;
+    }
+    mem_write8(lock, 0);
+    mem_write32(USB_GUEST_TFTP_CS + 4u, 0); /* saved PRIMASK */
+}
+
+static int a2bus_tftp_cs_hooks(uint32_t pc) {
+    if (pc == USB_GUEST_TFTP_CS_ENTER_V || pc == USB_GUEST_TFTP_CS_ENTER) {
+        a2bus_ensure_tftp_cs();
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == USB_GUEST_TFTP_CS_EXIT_V || pc == USB_GUEST_TFTP_CS_EXIT) {
+        uint32_t lock = mem_read32(USB_GUEST_TFTP_CS);
+        if (lock != 0u) {
+            mem_write8(lock, 0);
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    return 0;
 }
 
 /* Launch BusLoop after CYW43 bring-up so core1 PIO is not HardFaulted by
@@ -864,6 +908,33 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
+    if (a2bus_tftp_cs_hooks(pc)) {
+        return 1;
+    }
+
+    /* RunTFTP: after DebugPrintHeap, cbz r6 uses dir. Host printf can clobber
+     * callee-saved r6 — restore from tftp_state.dir (download=0). */
+    if (pc == USB_GUEST_RUNTFTP_AFTER_HEAP) {
+        cpu.r[6] = mem_read32(USB_GUEST_TFTP_STATE + 12u); /* dir */
+        return 0;
+    }
+    if (pc == USB_GUEST_CTFTPRX_EVTSTART) {
+        static int once;
+        if (!once++) {
+            fprintf(stderr, "[A2Bus] CTFTPRXTask::EvtStart (status→WIFICONNECTING)\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
+    if (pc == USB_GUEST_CTFTPRX_STARTXFER) {
+        static int once;
+        if (!once++) {
+            fprintf(stderr, "[A2Bus] CTFTPRXTask::StartTransfer (RRQ → :69)\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
+
     if (a2bus_stub_cyw43()) {
         if (pc == USB_GUEST_CYW43_ARCH_INIT) {
             static int once;
@@ -1000,15 +1071,21 @@ static int a2bus_spi_flash_hooks(void) {
         uint32_t base = cpu.r[0];
         uint32_t start = cpu.r[2];
         uint32_t end = cpu.r[3];
-        if (start <= end) {
-            uint32_t byte = start >> 3;
-            uint8_t mask = (uint8_t)(1u << (start & 7u));
+        uint32_t bit;
+        uint32_t found = 0xffffffffu;
+        /* Scan for a free bit — always returning `start` assigned every CS the
+         * same lock and left late inits with a corrupt/null spin_lock*. */
+        for (bit = start; bit <= end; bit++) {
+            uint32_t byte = bit >> 3;
+            uint8_t mask = (uint8_t)(1u << (bit & 7u));
             uint8_t v = mem_read8(base + byte);
-            mem_write8(base + byte, v | mask);
-            cpu.r[0] = start;
-        } else {
-            cpu.r[0] = 0xffffffffu;
+            if ((v & mask) == 0u) {
+                mem_write8(base + byte, (uint8_t)(v | mask));
+                found = bit;
+                break;
+            }
         }
+        cpu.r[0] = found;
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
