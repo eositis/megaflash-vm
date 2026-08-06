@@ -436,6 +436,16 @@ static int a2bus_busy_is_long_command(void)
         return 1;
     if (pc >= 0x10002738u && pc <= 0x10002900u) /* DoTFTPStatus */
         return 1;
+    /* strcmp/strcpy/strlen — DoTestWifi FormatIPAddr + DoTFTPStatus messages
+     * call these with BUSY still set; unstick mid-call HardFaults BusLoop. */
+    if (pc >= 0x1002a420u && pc <= 0x1002a900u)
+        return 1;
+    /* TFTPFormat* helpers called from DoTFTPStatus */
+    if (pc >= 0x1000a7c0u && pc <= 0x1000aa00u)
+        return 1;
+    /* timer_time_us_64 / time_us_64 during DoTFTPStatus */
+    if (pc >= 0x1000c024u && pc <= 0x1000c080u)
+        return 1;
     return 0;
 }
 

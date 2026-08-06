@@ -571,8 +571,9 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
-    /* After FormatIPAddr×4 — always rewrite from testResult/netif (not only
-     * when empty: guest may leave non-NUL junk that skipped the old fill). */
+    /* After FormatIPAddr×4 — always rewrite from testResult/netif.
+     * Note: host FormatIPAddr returns via LR in the same cpu_step, so this
+     * PC is often skipped; also fill at DoTestWifi epilogue below. */
     if (pc == USB_GUEST_DO_TESTWIFI_AFTER_FMT) {
         char ip[4][20];
         a2bus_fill_testwifi_databuffer(ip);
@@ -583,18 +584,43 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
-    /* DoTestWifi common exit (ClearError / timeout / CheckPicoW fail). */
+    /* DoTestWifi exit cleanup starts at 0x10001d2a; BUSY is still set until
+     * BusLoop resumes after the pop at 0x10001d46. Ending long_cmd at 0x10001d2a
+     * allowed unstick mid-strcpy → HardFault ("RunT…") and killed TFTP. */
     if (pc == 0x10001d2au && a2bus_long_cmd_active()) {
+        char ip[4][20];
+        a2bus_fill_testwifi_databuffer(ip);
+        fprintf(stderr,
+                "[A2Bus] DoTestWifi dataBuffer: ip='%s' mask='%s' gw='%s' dns='%s'\n",
+                ip[0], ip[1], ip[2], ip[3]);
+        fflush(stderr);
+        return 0; /* keep long_cmd until pop return */
+    }
+    if (pc == 0x10001d46u && a2bus_long_cmd_active()) {
         a2bus_long_cmd_end();
         return 0;
     }
 
-    /* DoTFTPRun waits up to 30s for core0 task start with BUSY set. */
-    if (pc == USB_GUEST_DO_TFTP_RUN) {
-        a2bus_long_cmd_begin("DoTFTPRun");
+    /* DoTFTPRun waits up to 30s for core0 task start with BUSY set.
+     * Exit is the sole pop at 0x100025e4 (also early-error returns). */
+    if (pc == USB_GUEST_DO_TFTP_RUN || pc == 0x200045e0u) {
+        if (!a2bus_long_cmd_active())
+            a2bus_long_cmd_begin("DoTFTPRun");
         return 0;
     }
     if (pc == 0x100025e4u && a2bus_long_cmd_active()) {
+        a2bus_long_cmd_end();
+        return 0;
+    }
+
+    /* DoTFTPStatus builds dataBuffer via sprintf/strcpy while BUSY — same
+     * unstick hazard as DoTestWifi (HardFault PC="RunT…" / LOCKUP). */
+    if (pc == 0x10002738u || pc == 0x20004578u) {
+        if (!a2bus_long_cmd_active())
+            a2bus_long_cmd_begin("DoTFTPStatus");
+        return 0;
+    }
+    if (pc == 0x10002836u && a2bus_long_cmd_active()) {
         a2bus_long_cmd_end();
         return 0;
     }

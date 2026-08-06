@@ -147,7 +147,9 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **TFTP:** Needs live core0 (avoid TestWifi abort). Transfer uses guest lwIP → TAP UDP NAT.
 
-**TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel).
+**Post-TestWifi HardFault (`PC=0x546E7552` / `"RunT…"`) then TFTP dead:** `long_cmd` used to end at DoTestWifi cleanup start (`0x10001d2a`) while CMD BUSY was still set; the next STATUS poll unstuck BusLoop mid-`strcpy`/`DoTFTPStatus` and corrupted PC. End long_cmd on the DoTestWifi `pop` (`0x10001d46`); arm long_cmd for `DoTFTPStatus` (veneer + flash); skip unstick while core1 is in strcmp/strcpy/TFTPFormat*/`timer_time_us_64`.
+
+**TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel). Also appears when BusLoop HardFaulted after TestWifi — Status never refreshed.
 
 **CP bottom-line flicker (cols 32–39):** That is `DisplayTime()` — firmware version (`CMD_GETFIRMWAREVER`) plus clock (`CMD_GETTIMESTR`). `DoGetTimeString` uses `sprintf` → newlib `_svfprintf_r`, which hangs under a2bus (BUSY timeout around `0x1002DE12`). That is an emu newlib/sprintf gap (host-complete `DoGetTimeString` / stub `_svfprintf_r`), separate from Test Wifi result strings.
 
