@@ -606,13 +606,22 @@ static int a2bus_spi_flash_hooks(void) {
         return 1;
     }
     /*
-     * Host-format guest printf. Never enter newlib _vfprintf_r / _svfprintf_r
-     * under a2bus: dual-core smash turns mbtowc into 0x30034280 → HardFault, or
-     * _svfprintf_r spins (CMD BUSY timeout @0x1002DE12) → CP clock line junk.
+     * Host-format guest printf / sprintf. Never enter newlib _svfprintf_r under
+     * a2bus (hangs). sprintf must still write the formatted string into guest
+     * RAM — returning 0 left dest empty (TFTP Status showed leftover hostname).
      */
+    if (pc == 0x10028040u) { /* sprintf */
+        uint32_t dest = cpu.r[0];
+        uint32_t fmt = cpu.r[1];
+        uint32_t ap = usb_guest_sprintf_make_ap(cpu.r[13]);
+        int n = usb_guest_host_sprintf(dest, fmt, ap, 4096u);
+        usb_guest_return_to_lr((uint32_t)n);
+        return 1;
+    }
     if (pc == USB_GUEST_VFPRINTF_R ||
         pc == USB_GUEST_SVFPRINTF_R ||
         pc == USB_GUEST_SVFIPRINTF_R) {
+        /* Direct _svfprintf_r (not via our sprintf hook): no safe guest FILE. */
         usb_guest_return_to_lr(0);
         return 1;
     }

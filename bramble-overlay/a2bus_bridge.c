@@ -358,10 +358,47 @@ static int mf_native_mode(void)
  * chkmegaflashex sees BUSY stuck and skips MegaFlash boot entirely.
  * Re-enter BusLoop (native) and clear BUSY/ERROR so detection and COLDSTART work.
  */
+/*
+ * DoTestWifi / TFTP sleep-wait with STATUS BUSY for up to ~90s while core0
+ * runs IPC. Unsticking mid-command clears BUSY before FormatIPAddr fills
+ * dataBuffer — CP then shows NETERR garbage / empty IP lines ("AG").
+ */
+static int a2bus_busy_is_long_command(void)
+{
+    uint32_t pc = cores[CORE1].r[15] & ~1u;
+    /* DoTestWifi */
+    if (pc >= 0x10001d1cu && pc <= 0x10001e60u) {
+        return 1;
+    }
+    /* sleep_ms / sleep_us / time_reached wait inside long cmds */
+    if (pc >= 0x1000be78u && pc <= 0x1000beb8u) {
+        return 1;
+    }
+    if (pc >= 0x1000c078u && pc <= 0x1000c0c0u) {
+        return 1;
+    }
+    /* DoTFTPRun / DoTFTPStatus */
+    if (pc >= 0x10002700u && pc <= 0x10002900u) {
+        return 1;
+    }
+    return 0;
+}
+
 static void a2bus_unstick_busloop(const char *why)
 {
     uint32_t c1pc = cores[CORE1].r[15] & ~1u;
     uint8_t st = peek_reg(0);
+    if ((st & MF_BUSYFLAG) != 0 && a2bus_busy_is_long_command()) {
+        static int skip_logged;
+        if (skip_logged < 4) {
+            skip_logged++;
+            fprintf(stderr,
+                    "[A2Bus] skip unstick (%s) — long cmd core1PC=0x%08X\n",
+                    why, c1pc);
+            fflush(stderr);
+        }
+        return;
+    }
     fprintf(stderr,
             "[A2Bus] unstick BusLoop (%s) core1PC=0x%08X status=0x%02X\n",
             why, c1pc, st);
