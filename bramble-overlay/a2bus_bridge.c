@@ -416,7 +416,9 @@ static int a2bus_busy_is_long_command(void)
     /* Backup if begin hook missed: DoTestWifi / DoTFTP bodies only */
     if (pc >= 0x10001d1cu && pc <= 0x10001e60u)
         return 1;
-    if (pc >= 0x10002700u && pc <= 0x10002900u)
+    if (pc >= 0x100025ccu && pc <= 0x10002700u) /* DoTFTPRun */
+        return 1;
+    if (pc >= 0x10002738u && pc <= 0x10002900u) /* DoTFTPStatus */
         return 1;
     return 0;
 }

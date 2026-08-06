@@ -138,10 +138,13 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi IP lines garbled / zero-flood:** was caused by host-completing `DoTestWifi` (wrong approach) plus DATA-path bugs. Correct model: pump both cores while BUSY; let firmware `FormatIPAddr` fill `dataBuffer`. Guest-path DATA READ must return the pre-advance register byte.
 
-**CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / empty gw/dns):** Two causes:
+**CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / empty gw/dns):** Causes and fixes:
 
-1. **GetNetworkTime r6 clobber** after boot NTP → core0 takes the 5‑minute retry path → second `RunNTP` throws → `_exit`. Overlay repairs return + forces `core0Loop` `r4=NETERR_NONE` after NTP `InitRTC`.
-2. **BUSY unstick mid-DoTestWifi** while core1 waits — force-clear BUSY before `FormatIPAddr`. Overlay uses `a2bus_long_cmd_begin/end` around `DoTestWifi` and skips unstick only while that flag (or DoTestWifi/DoTFTP PC) is active. Do **not** blanket-skip all `sleep`/`busy_wait` PCs: that hung MAME (`timer_busy_wait_until` + `depth=0`) after core0 abort and required force-quit. Do **not** skip already-UP `ConnectWifi` warm-up (breaks second NTP / TestWifi re-entry).
+1. **GetNetworkTime r6 clobber** → core0 5‑minute retry / abort. Overlay repairs return + forces `core0Loop` success after NTP `InitRTC`.
+2. **BUSY unstick mid-DoTestWifi** → skip only while `a2bus_long_cmd_*` (not all `busy_wait` PCs — that hung MAME).
+3. **`FormatIPAddr` / `ip4addr_ntoa`+`strcpy` under Thumb emu** leave short non-NUL junk in `dataBuffer`; CP `PrintStringFromDataBuffer` then prints garbage / screen leftovers. Overlay **host-completes `FormatIPAddr`** and **always** rewrites the four IP strings from `testResult` (or live netif/DNS) after FormatIPAddr×4 — not only when the first byte is NUL.
+
+**TFTP:** `DoTFTPRun` also holds BUSY while waiting for core0 task start — long_cmd covers that wait. Transfer itself uses guest lwIP → CYW43 → TAP UDP NAT (same path as DNS/NTP).
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel).
 

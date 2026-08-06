@@ -110,7 +110,16 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_DO_TEST_WIFI        0x10001d1cu /* DoTestWifi (core1) */
 #define USB_GUEST_GET_NETWORK_TIME    0x1000859cu /* GetNetworkTime */
 #define USB_GUEST_GET_NETWORK_TIME_RET 0x100085c8u /* GetNetworkTime: mov r0,r6; return */
+#define USB_GUEST_FORMAT_IP_ADDR      0x10001cf8u /* FormatIPAddr */
 #define USB_GUEST_DO_TESTWIFI_AFTER_FMT 0x10001e1eu /* after FormatIPAddr x4 → exit */
+#define USB_GUEST_DO_TFTP_RUN         0x100025ccu /* DoTFTPRun */
+#define USB_GUEST_TEST_RESULT         0x200580a0u /* static TestResult_t in DoTestWifi */
+#define USB_GUEST_CYW43_STATE         0x2000c13cu
+#define USB_GUEST_DNS_SERVERS         0x2000cd74u
+/* cyw43_state.netif[0] ip/mask/gw: see cyw43_tcpip_link_status offsets */
+#define USB_GUEST_NETIF_IP            (USB_GUEST_CYW43_STATE + 0x8d8u)
+#define USB_GUEST_NETIF_MASK          (USB_GUEST_CYW43_STATE + 0x8dcu)
+#define USB_GUEST_NETIF_GW            (USB_GUEST_CYW43_STATE + 0x8e0u)
 #define USB_GUEST_CONNECT_WIFI        0x10008bacu /* CUDPTask::ConnectWifi */
 #define USB_GUEST_INIT_CYW43          0x100088f4u /* CUDPTask::InitCyw43 */
 #define USB_GUEST_CYW43_ARCH_INIT     0x1001b030u /* cyw43_arch_init (InitPicoLed) */
@@ -179,6 +188,70 @@ static void a2bus_write_tm(uint32_t tm_ptr, const struct tm *t) {
     mem_write32(tm_ptr + 24u, (uint32_t)t->tm_wday);
     mem_write32(tm_ptr + 28u, (uint32_t)t->tm_yday);
     mem_write32(tm_ptr + 32u, (uint32_t)t->tm_isdst);
+}
+
+/* lwIP ip4 word (host LE) → "a.b.c.d" into guest RAM; returns bytes written incl NUL. */
+static int a2bus_write_ip_cstr(uint32_t dest, uint32_t ip_le)
+{
+    char buf[20];
+    int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                     (unsigned)(ip_le & 0xffu),
+                     (unsigned)((ip_le >> 8) & 0xffu),
+                     (unsigned)((ip_le >> 16) & 0xffu),
+                     (unsigned)((ip_le >> 24) & 0xffu));
+    int i;
+    if (n < 0)
+        n = 0;
+    for (i = 0; i <= n; i++)
+        mem_write8(dest + (uint32_t)i, (uint8_t)buf[i]);
+    return n + 1;
+}
+
+/*
+ * Always rewrite DoTestWifi's four dataBuffer C strings from testResult (EvtStart
+ * lease) or live netif/DNS. Guest ip4addr_ntoa+strcpy often leaves junk/short
+ * non-NUL garbage ("BXX") so the CP prints leftovers instead of real IPs.
+ */
+static void a2bus_fill_testwifi_databuffer(char out[4][20])
+{
+    uint32_t ips[4];
+    uint32_t off = 0;
+    int s;
+    ips[0] = mem_read32(USB_GUEST_TEST_RESULT + 0u);
+    ips[1] = mem_read32(USB_GUEST_TEST_RESULT + 4u);
+    ips[2] = mem_read32(USB_GUEST_TEST_RESULT + 8u);
+    ips[3] = mem_read32(USB_GUEST_TEST_RESULT + 12u);
+    if (ips[0] == 0u) {
+        ips[0] = mem_read32(USB_GUEST_NETIF_IP);
+        ips[1] = mem_read32(USB_GUEST_NETIF_MASK);
+        ips[2] = mem_read32(USB_GUEST_NETIF_GW);
+        ips[3] = mem_read32(USB_GUEST_DNS_SERVERS);
+        fprintf(stderr, "[A2Bus] DoTestWifi testResult empty — using netif/DNS\n");
+    }
+    for (s = 0; s < 4; s++) {
+        char buf[20];
+        int n = snprintf(buf, sizeof(buf), "%u.%u.%u.%u",
+                         (unsigned)(ips[s] & 0xffu),
+                         (unsigned)((ips[s] >> 8) & 0xffu),
+                         (unsigned)((ips[s] >> 16) & 0xffu),
+                         (unsigned)((ips[s] >> 24) & 0xffu));
+        int i;
+        if (n < 0)
+            n = 0;
+        for (i = 0; i <= n; i++) {
+            mem_write8(USB_GUEST_DATA_BUFFER + off + (uint32_t)i, (uint8_t)buf[i]);
+            if (i < 19)
+                out[s][i] = buf[i];
+        }
+        if (n < 19)
+            out[s][n] = '\0';
+        else
+            out[s][19] = '\0';
+        off += (uint32_t)n + 1u;
+    }
+    mem_write8(USB_GUEST_DATA_XFER_MODE, 0); /* MODE_LINEAR */
+    mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
+    mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
 }
 
 static void a2bus_apply_init_rtc(time_t utc_epoch, int32_t offset_sec) {
@@ -410,49 +483,22 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
-    /* After FormatIPAddr fills dataBuffer — log what Apple will print.
-     * If guest ntoa/strcpy left empties, fill from testResult IP words (same
-     * data EvtStart wrote; not fabricated status). */
+    /* Host FormatIPAddr: guest ip4addr_ntoa + newlib strcpy leave junk/short
+     * strings under Thumb emu → CP shows "BXX"/"AS" leftovers. */
+    if (pc == USB_GUEST_FORMAT_IP_ADDR) {
+        uint32_t dest = cpu.r[0];
+        uint32_t ip = cpu.r[1];
+        int n = a2bus_write_ip_cstr(dest, ip);
+        cpu.r[0] = dest + (uint32_t)n;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+
+    /* After FormatIPAddr×4 — always rewrite from testResult/netif (not only
+     * when empty: guest may leave non-NUL junk that skipped the old fill). */
     if (pc == USB_GUEST_DO_TESTWIFI_AFTER_FMT) {
         char ip[4][20];
-        uint32_t off = 0;
-        int s;
-        uint32_t test_result = 0x200580a0u; /* static TestResult_t in DoTestWifi */
-        for (s = 0; s < 4; s++) {
-            int i;
-            for (i = 0; i < 19; i++) {
-                uint8_t c = mem_read8(USB_GUEST_DATA_BUFFER + off + (uint32_t)i);
-                if (c == 0) {
-                    ip[s][i] = '\0';
-                    off += (uint32_t)i + 1u;
-                    break;
-                }
-                ip[s][i] = (char)(c & 0x7fu);
-            }
-            if (i >= 19) {
-                ip[s][19] = '\0';
-                off += 19;
-            }
-        }
-        if (ip[0][0] == '\0') {
-            off = 0;
-            for (s = 0; s < 4; s++) {
-                uint32_t w = mem_read32(test_result + (uint32_t)s * 4u);
-                int n = snprintf(ip[s], sizeof(ip[s]), "%u.%u.%u.%u",
-                                 (unsigned)(w & 0xffu),
-                                 (unsigned)((w >> 8) & 0xffu),
-                                 (unsigned)((w >> 16) & 0xffu),
-                                 (unsigned)((w >> 24) & 0xffu));
-                int i;
-                for (i = 0; i <= n; i++) {
-                    mem_write8(USB_GUEST_DATA_BUFFER + off + (uint32_t)i,
-                               (uint8_t)ip[s][i]);
-                }
-                off += (uint32_t)n + 1u;
-            }
-            fprintf(stderr,
-                    "[A2Bus] DoTestWifi FormatIPAddr empty — filled from testResult\n");
-        }
+        a2bus_fill_testwifi_databuffer(ip);
         fprintf(stderr,
                 "[A2Bus] DoTestWifi dataBuffer: ip='%s' mask='%s' gw='%s' dns='%s'\n",
                 ip[0], ip[1], ip[2], ip[3]);
@@ -462,6 +508,16 @@ static int a2bus_wifi_hooks(void) {
 
     /* DoTestWifi common exit (ClearError / timeout / CheckPicoW fail). */
     if (pc == 0x10001d2au && a2bus_long_cmd_active()) {
+        a2bus_long_cmd_end();
+        return 0;
+    }
+
+    /* DoTFTPRun waits up to 30s for core0 task start with BUSY set. */
+    if (pc == USB_GUEST_DO_TFTP_RUN) {
+        a2bus_long_cmd_begin("DoTFTPRun");
+        return 0;
+    }
+    if (pc == 0x100025e4u && a2bus_long_cmd_active()) {
         a2bus_long_cmd_end();
         return 0;
     }
