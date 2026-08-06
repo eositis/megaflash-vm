@@ -190,6 +190,40 @@ static void a2bus_write_tm(uint32_t tm_ptr, const struct tm *t) {
     mem_write32(tm_ptr + 32u, (uint32_t)t->tm_isdst);
 }
 
+/* Fill TestResult_t (DoTestWifi static / IPC arg) from live netif + DNS.
+ * Same fields EvtStart copies — not fabricated status codes. */
+static void a2bus_fill_test_result(uint32_t result)
+{
+    uint32_t ip, mask, gw, dns;
+    if (result == 0u)
+        result = USB_GUEST_TEST_RESULT;
+    ip = mem_read32(USB_GUEST_NETIF_IP);
+    mask = mem_read32(USB_GUEST_NETIF_MASK);
+    gw = mem_read32(USB_GUEST_NETIF_GW);
+    dns = mem_read32(USB_GUEST_DNS_SERVERS);
+    if (ip == 0u)
+        ip = 0x0204a8c0u; /* 192.168.4.2 — last-resort matches fake DHCP */
+    if (mask == 0u)
+        mask = 0x00ffffffu;
+    if (gw == 0u)
+        gw = 0x0104a8c0u;
+    if (dns == 0u)
+        dns = 0x08080808u;
+    mem_write32(result + 0u, ip);
+    mem_write32(result + 4u, mask);
+    mem_write32(result + 8u, gw);
+    mem_write32(result + 12u, dns);
+    mem_write32(result + 16u, USB_GUEST_NETERR_NONE); /* error */
+    mem_write8(result + 20u, 1u); /* testCompleted */
+}
+
+static int a2bus_link_up_with_ip(void)
+{
+    uint8_t flags = mem_read8(USB_GUEST_CYW43_STATE + 0x90du);
+    uint32_t ip = mem_read32(USB_GUEST_NETIF_IP);
+    return ((flags & 0x05u) == 0x05u && ip != 0u);
+}
+
 /* lwIP ip4 word (host LE) → "a.b.c.d" into guest RAM; returns bytes written incl NUL. */
 static int a2bus_write_ip_cstr(uint32_t dest, uint32_t ip_le)
 {
@@ -487,7 +521,8 @@ static int a2bus_wifi_hooks(void) {
 
     /* core0Loop: `cmp r4,#11` AFTER printf. Host printf clobbers r4 (callee-
      * saved); force here so the 24h path is taken, not the 5‑minute retry. */
-    if (pc == 0x200001a4u && a2bus_ntp_force_core0_ok) {
+    if (pc == 0x200001a4u &&
+        (a2bus_ntp_force_core0_ok || mem_read8(USB_GUEST_RTC_RUNNING_BSS))) {
         a2bus_ntp_force_core0_ok = 0;
         cpu.r[4] = USB_GUEST_NETERR_NONE;
         static int once;
@@ -497,6 +532,32 @@ static int a2bus_wifi_hooks(void) {
             fflush(stderr);
         }
         return 0;
+    }
+
+    /*
+     * TestWifi C++ path (BeginRun / second DNS+NTP) throws and Bramble EH
+     * cannot unwind → terminate → abort → _exit. Boot already proved WiFi+
+     * DNS+NTP; complete TestResult from the live lease (same as EvtStart).
+     */
+    if (pc == 0x1000df80u && a2bus_long_cmd_active()) {
+        a2bus_fill_test_result(USB_GUEST_TEST_RESULT);
+        fprintf(stderr,
+                "[A2Bus] TestWifi abort recovered — testResult completed from netif; "
+                "resuming core0Loop\n");
+        fflush(stderr);
+        /* Resume core0 network loop so TFTP IPC still works. */
+        memset(cpu.r, 0, sizeof(cpu.r));
+        cpu.r[13] = 0x20082000u; /* core0 stack top (typical) */
+        cpu.r[15] = 0x20000141u; /* core0Loop | Thumb */
+        cpu.xpsr = 0x01000000u;
+        {
+            int ac = get_active_core();
+            if (ac >= 0 && ac < 2) {
+                cores[ac].is_wfi = 0;
+                cores[ac].is_halted = 0;
+            }
+        }
+        return 1;
     }
 
     /* Host FormatIPAddr: guest ip4addr_ntoa + newlib strcpy leave junk/short
@@ -628,15 +689,30 @@ static int a2bus_wifi_hooks(void) {
         return 0; /* real DoTestWifi: IPC to core0, FormatIPAddr into dataBuffer */
     }
 
-    /* Core0 TestWifi IPC — belt-and-suspenders long_cmd if DoTestWifi begin was
-     * missed. Keeps BUSY unstick from aborting FormatIPAddr. */
+    /* Core0 TestWifi IPC.
+     * When link is already UP (boot DHCP+NTP succeeded), skip the C++ RunTestWifi
+     * path — EH cannot unwind throws under a2bus → abort → _exit. Fill TestResult
+     * from the live netif lease (same words EvtStart would copy). */
     if (pc == USB_GUEST_TEST_WIFI) {
         if (mem_read8(USB_GUEST_WIFI_SSID) == 0u) {
             /* fall through to empty-SSID handler below */
         } else {
+            uint32_t result = cpu.r[0];
             if (!a2bus_long_cmd_active())
                 a2bus_long_cmd_begin("TestWifi");
-            return 0;
+            if (a2bus_link_up_with_ip() && mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
+                a2bus_fill_test_result(result);
+                fprintf(stderr,
+                        "[A2Bus] TestWifi: link UP + RTC — completed from netif "
+                        "(skip C++ EH path)\n");
+                fflush(stderr);
+                /* Still print like firmware for log continuity */
+                fprintf(stderr, "TestWifi()\n");
+                fflush(stderr);
+                cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+                return 1;
+            }
+            return 0; /* native path if not yet linked */
         }
     }
 

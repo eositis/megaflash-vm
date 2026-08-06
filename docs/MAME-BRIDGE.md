@@ -140,11 +140,12 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / empty gw/dns):** Causes and fixes:
 
-1. **GetNetworkTime / printf clobber `r4`** → second RunNTP abort. Skip GetNetworkTime while RTC running; force `r4` at cmp after printf.
-2. **BUSY unstick mid-DoTestWifi** — BusLoop RAM calls `__DoTestWifi_veneer`; long_cmd must begin on the **veneer and on core0 `TestWifi()`**, not flash-only. Also skip unstick while core0 PC is in TestWifi/RunTestWifi/ConnectWifi.
-3. **`FormatIPAddr` junk** — host-complete FormatIPAddr; always rewrite dataBuffer from testResult/netif.
+1. **GetNetworkTime / printf clobber `r4`** → skip GetNetworkTime while RTC running; force `r4` at cmp (also when RTC set).
+2. **BUSY unstick mid-DoTestWifi** — arm long_cmd on veneer + `TestWifi()`; skip unstick while core0 in TestWifi path.
+3. **`TestWifi` C++ EH abort** — second BeginRun/DNS/NTP throws; Bramble cannot unwind → `_exit`. When link is already UP and RTC is set (boot NTP proved connectivity), **complete `TestResult` from the live netif lease** (same fields `EvtStart` copies) and return — DoTestWifi then runs `FormatIPAddr`. Abort during long_cmd also recovers by filling `testResult` and resuming `core0Loop`.
+4. **`FormatIPAddr` junk** — host-complete FormatIPAddr; always rewrite dataBuffer from testResult/netif.
 
-**TFTP:** Needs live core0 through the TestWifi path (same long_cmd / BUSY hold). `DoTFTPRun` long_cmd covers startup wait.
+**TFTP:** Needs live core0 (avoid TestWifi abort). Transfer uses guest lwIP → TAP UDP NAT.
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel).
 
