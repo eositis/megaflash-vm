@@ -51,7 +51,7 @@ Flash-resident `ldr.w pc,[pc]` veneers to SRAM are Thumb-broken in Bramble when 
 
 `apple2c4` always includes a Dallas DS1216E no-slot clock. The Lua plugin mutes it on `$C100–$CFFF` so ProDOS/time come from MegaFlash (`CMD_GETTIMESTR` / clockdriver).
 
-**Test Wifi / NTP (radio stub → guest lwIP → TAP):** Bramble CYW43 accepts SSID/password, queues JOIN events, answers DHCP (`192.168.4.2/24`), and bridges other Ethernet to TAP/utun. Guest `cyw43_arch` owns ConnectWifi → DHCP → DNS → NTP → TFTP. Do **not** host-complete DNS/NTP or poke netif IPs.
+**Test Wifi / NTP (radio stub → guest lwIP → TAP):** Bramble CYW43 accepts SSID/password, queues JOIN events, answers DHCP (`192.168.4.2/24`, gw `192.168.4.1`, DNS `8.8.8.8`), and bridges other Ethernet to TAP/utun. Guest `cyw43_arch` owns ConnectWifi → DHCP → DNS → NTP → TFTP. Do **not** host-complete DNS/NTP or poke netif IPs. DNS is public (not the gateway) so queries NAT through the host.
 
 **CP Test Wifi (matches real hardware):** `DoTestWifi` on **core1** sets STATUS **BUSY**, pushes IPC, and sleep-waits while **core0** runs `TestWifi()` (up to 90s). The Apple CP also waits on BUSY — that is normal, not a stuck BusLoop. Firmware `EvtStart` copies netif/DNS into `testResult`, then `FormatIPAddr` fills `dataBuffer` for `PrintStringFromDataBuffer`. a2bus must **pump both cores** while BUSY. Stuck `connect status: 2` (NOIP) means DHCP TX never completed — usually pbuf `ref` asserts aborting `ip4_output` (must not soft-continue as ERR_BUF).
 
