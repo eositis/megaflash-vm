@@ -138,12 +138,13 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi IP lines garbled / zero-flood:** was caused by host-completing `DoTestWifi` (wrong approach) plus DATA-path bugs. Correct model: pump both cores while BUSY; let firmware `FormatIPAddr` fill `dataBuffer`. Guest-path DATA READ must return the pre-advance register byte.
 
-**CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / empty gw/dns):** Causes and fixes:
+**CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / `AG` / empty gw/dns):** Causes and fixes:
 
 1. **GetNetworkTime / printf clobber `r4`** → skip GetNetworkTime while RTC running; force `r4` at cmp (also when RTC set).
 2. **BUSY unstick mid-DoTestWifi** — arm long_cmd on veneer + `TestWifi()`; skip unstick while core0 in TestWifi path.
 3. **`TestWifi` C++ EH abort** — second BeginRun/DNS/NTP throws; Bramble cannot unwind → `_exit`. When link is already UP and RTC is set (boot NTP proved connectivity), **complete `TestResult` from the live netif lease** (same fields `EvtStart` copies) and return — DoTestWifi then runs `FormatIPAddr`. Abort during long_cmd also recovers by filling `testResult` and resuming `core0Loop`.
 4. **`FormatIPAddr` junk** — host-complete FormatIPAddr; always rewrite dataBuffer from testResult/netif.
+5. **core0 WFI treated as abort** — `a2bus_busy_is_long_command` returned 0 on `cores[CORE0].is_wfi` *before* long_cmd / DoTFTPRun PC checks. TestWifi/TFTP sleep on core0 (cyw43 / FIFO WFE) while core1 holds BUSY → false BUSY timeout → unstick → IP "AG"/blank and DoTFTPRun killed. long_cmd and known PC ranges now win; only guest `_exit` forces unstick.
 
 **TFTP:** Needs live core0 (avoid TestWifi abort). Transfer uses guest lwIP → TAP UDP NAT.
 

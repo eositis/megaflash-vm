@@ -404,9 +404,14 @@ static int a2bus_busy_is_long_command(void)
     uint32_t pc;
     uint32_t c0pc;
 
-    /* If core0 is parked after abort/_exit, never hold BUSY — MAME would freeze. */
     c0pc = cores[CORE0].r[15] & ~1u;
-    if (c0pc == 0x1000df80u || cores[CORE0].is_wfi)
+
+    /* Guest abort/_exit only — never hold BUSY or MAME freezes.
+     * Do NOT treat core0 WFI/WFE as abort: TestWifi/TFTP legitimately sleep
+     * on core0 (cyw43 wait / multicore FIFO) while core1 holds CMD BUSY.
+     * Checking is_wfi before long_cmd/PC ranges caused BUSY timeout unstick
+     * mid-DoTestWifi → CP IP "AG"/blank and killed DoTFTPRun. */
+    if (c0pc == 0x1000df80u)
         return 0;
 
     if (a2bus_long_cmd_active())
@@ -427,6 +432,9 @@ static int a2bus_busy_is_long_command(void)
         return 1;
     if (c0pc >= 0x10008ddcu && c0pc < 0x10009300u) /* CUDPTask pump / Evt* */
         return 1;
+    /* multicore_fifo_pop_blocking WFE loop — core0 waiting on IPC */
+    if (c0pc >= 0x10011614u && c0pc <= 0x1001162au)
+        return 1;
 
     pc = cores[CORE1].r[15] & ~1u;
     /* Backup if begin hook missed: DoTestWifi / DoTFTP bodies only */
@@ -435,6 +443,9 @@ static int a2bus_busy_is_long_command(void)
     if (pc >= 0x100025ccu && pc <= 0x10002700u) /* DoTFTPRun */
         return 1;
     if (pc >= 0x10002738u && pc <= 0x10002900u) /* DoTFTPStatus */
+        return 1;
+    /* sleep_ms / sleep_us / best_effort_wfe while CMD BUSY (core1 wait) */
+    if (pc >= 0x1000be78u && pc <= 0x1000bf20u)
         return 1;
     /* strcmp/strcpy/strlen — DoTestWifi FormatIPAddr + DoTFTPStatus messages
      * call these with BUSY still set; unstick mid-call HardFaults BusLoop. */
@@ -483,6 +494,9 @@ static void a2bus_unstick_busloop(const char *why)
             "[A2Bus] unstick BusLoop (%s) core1PC=0x%08X status=0x%02X\n",
             why, c1pc, st);
     fflush(stderr);
+    /* Drop stale long_cmd so the next CMD can begin cleanly. */
+    while (a2bus_long_cmd_active())
+        a2bus_long_cmd_end();
     poke_reg(0, (uint8_t)(st & (uint8_t)~(MF_BUSYFLAG | 0x5Fu)));
     uint8_t id = peek_reg(3);
     if (id != 0x96u && id != 0x69u) {
