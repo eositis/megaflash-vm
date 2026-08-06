@@ -155,6 +155,8 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_RUNTFTP_EPILOGUE     0x10001104u /* RunTFTP: ldmia ... pc */
 #define USB_GUEST_WRAP_MALLOC         0x1000df04u /* __wrap_malloc */
 #define USB_GUEST_WRAP_FREE           0x1000df60u /* __wrap_free */
+#define USB_GUEST_OPERATOR_NEW        0x1001f268u /* _Znwj operator new(unsigned) */
+#define USB_GUEST_OPERATOR_NEW_ARR    0x1001f2a4u /* _Znaj operator new[] → _Znwj */
 #define USB_GUEST_CTFTPRX_CTOR        0x100099b8u /* CTFTPRXTask::CTFTPRXTask */
 #define USB_GUEST_HEAP_END_PTR        0x2000d1e4u /* _sbrk heap_end */
 #define USB_GUEST_HEAP_BASE           0x20061628u /* __end__ */
@@ -652,6 +654,38 @@ static uint32_t a2bus_host_bump_malloc(uint32_t size) {
 static int a2bus_malloc_hooks(uint32_t pc) {
     if (!a2bus_tftp_bump_malloc) {
         return 0;
+    }
+    /*
+     * Host-complete operator new while bump is active. dual_core_step used to
+     * clear Thumb IT on every bind, so `_Znwj`'s `it cc; movcc r0,#1` always
+     * ran and forced size=1 before wrap_malloc. Even with IT preserved, take
+     * size at function entry (before the clamp) and bump-allocate directly.
+     */
+    if (pc == USB_GUEST_OPERATOR_NEW || pc == USB_GUEST_OPERATOR_NEW_ARR) {
+        uint32_t size = cpu.r[0];
+        uint32_t lr = cpu.r[14] & ~1u;
+        if (size < 1u) {
+            size = 1u;
+        }
+        /* Recover known RunTFTP object sizes if IT still corrupted r0. */
+        if (size < 16u) {
+            if (lr == 0x10001016u) {
+                size = 184u; /* CTFTPRXTask */
+            } else if (lr == 0x1000100eu) {
+                size = 200u; /* CTFTPTXTask */
+            }
+        }
+        uint32_t p = a2bus_host_bump_malloc(size);
+        static int logged;
+        if (logged < 12) {
+            fprintf(stderr, "[A2Bus] TFTP operator new(%u) lr=0x%08X → 0x%08X\n",
+                    (unsigned)size, lr, p);
+            fflush(stderr);
+            logged++;
+        }
+        cpu.r[0] = p;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
     }
     if (pc == USB_GUEST_WRAP_MALLOC) {
         uint32_t size = cpu.r[0];

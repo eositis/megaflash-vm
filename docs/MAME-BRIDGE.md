@@ -158,7 +158,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 1. `DebugPrintHeapState` → newlib `mallinfo` freelist walk hangs (`PC≈0x1002ABAA`). Skip `__malloc_update_mallinfo`; stub `DebugPrintHeapState`.
 2. `UpdateTFTPState` → `tftp_critical_section_enter_blocking` spins on bad `tftp_cs.spin_lock*`. Host-complete tftp CS enter/exit; fix `hw_claim_unused` free-bit scan.
 3. Corrupted newlib freelist + stubbed `check_alloc` → `__wrap_malloc` returns a pointer into `configBuffer` during CTFTP* `new`. **Host bump-allocator only while `RunTFTP` is active** (global bump + no-op free exhausted the heap during cyw43/lwIP and caused “MegaFlash not found” / no SmartPort boot).
-4. **JIT ignored Thumb IT predicates** — `_Znwj`’s `it cc; movcc r0,#1` always ran, so every `new` requested 1 byte → ctor overflow → `abort`/`_exit`; CP Status returned to Idle. Fixed in Bramble `jit_execute`.
+4. **Thumb IT destroyed by `dual_core_step` bind** — `cpu_bind_core_context` cleared IT every instruction, so `_Znwj`’s `it cc; movcc r0,#1` always ran → every `new` requested 1 byte → ctor overflow → `abort`/`_exit`; CP Status returned to Idle. (JIT IT fix alone was insufficient: a2bus launcher does not pass `-jit`.) Preserve IT across bind; a2bus also host-completes `_Znwj`/`_Znaj` during RunTFTP bump-malloc.
 
 DNS/NTP TAP UDP NAT already proves host sockets work; once RRQ is sent, `192.168.0.10:69` uses the same NAT path (guest is on `192.168.4.0/24`, so LAN TFTP is routed via the fake gw then NAT’d).
 
