@@ -608,6 +608,29 @@ static int a2bus_wifi_hooks(void) {
             a2bus_long_cmd_begin("DoTFTPRun");
         return 0;
     }
+    /* SaveTFTPLastServer (flag&1 from CP StartTFTP): newlib strcmp hung forever
+     * under Thumb emu. Host-complete + persist; skip SPI security-register path. */
+    if (pc == 0x10005584u) {
+        uint32_t host = cpu.r[0];
+        uint32_t dest = USB_GUEST_CONFIG_BUFFER + 0x82u; /* tftp_lastserver */
+        uint32_t i;
+        char name[48];
+        for (i = 0; i < 47u; i++) {
+            uint8_t c = mem_read8(host + i);
+            name[i] = (char)c;
+            mem_write8(dest + i, c);
+            if (c == 0u)
+                break;
+        }
+        name[i < 47u ? i : 47u] = '\0';
+        for (; i < 48u; i++)
+            mem_write8(dest + i, 0);
+        usb_guest_persist_config_to_host();
+        fprintf(stderr, "[A2Bus] SaveTFTPLastServer host-complete ('%s')\n", name);
+        fflush(stderr);
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
     if (pc == 0x100025e4u && a2bus_long_cmd_active()) {
         a2bus_long_cmd_end();
         return 0;
