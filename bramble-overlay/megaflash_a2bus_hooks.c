@@ -140,8 +140,10 @@ static int a2bus_rtc_valid;
 static time_t a2bus_rtc_base_local;
 static time_t a2bus_rtc_host_at_set;
 /* Set when InitRTC runs after a successful RunNTP; used to repair GetNetworkTime's
- * return (r6 clobbered under emu across aon_timer_start → garbage != NETERR_NONE). */
+ * return (r6 clobbered under emu across aon_timer_start → garbage != NETERR_NONE).
+ * Sticky until core0Loop has consumed the repaired value into r4. */
 static int a2bus_ntp_init_rtc_ok;
+static int a2bus_ntp_force_core0_ok;
 
 static const int32_t a2bus_tzhour[] = {
     -12,-11,-10,-9,-9,-8,-7,-6,-5,-4,-3,-3,-2,-1,0,1,2,3,3,4,4,5,5,5,6,6,7,8,8,9,9,10,10,11,12,12,13,14
@@ -363,19 +365,22 @@ static int a2bus_wifi_hooks(void) {
         /* Plausible Unix epoch → treat as successful NTP InitRTC for return repair. */
         if ((uint32_t)cpu.r[0] > 1700000000u) {
             a2bus_ntp_init_rtc_ok = 1;
+            a2bus_ntp_force_core0_ok = 1;
         }
         return 0; /* let guest InitRTC run */
     }
 
     if (pc == USB_GUEST_GET_NETWORK_TIME || pc == 0x200044b0u) {
         a2bus_ntp_init_rtc_ok = 0; /* only set if InitRTC runs during this call */
+        a2bus_ntp_force_core0_ok = 0;
         return 0;
     }
 
     /* GetNetworkTime keeps NETERR_NONE in r6 across InitRTC; aon_timer_start
      * clobbers r6 under Thumb emu so core0Loop sees a pointer-sized "error",
      * takes the 5‑minute retry path (often immediately), second RunNTP throws
-     * → abort → core0 parked at _exit → TestWifi/TFTP IPC never runs. */
+     * → abort → core0 parked at _exit → TestWifi/TFTP IPC never runs.
+     * Success path branches to InitRTC then back to 0x100085c8 (mov r0,r6). */
     if (pc == USB_GUEST_GET_NETWORK_TIME_RET && a2bus_ntp_init_rtc_ok) {
         a2bus_ntp_init_rtc_ok = 0;
         cpu.r[6] = USB_GUEST_NETERR_NONE;
@@ -385,6 +390,21 @@ static int a2bus_wifi_hooks(void) {
             fprintf(stderr,
                     "[A2Bus] GetNetworkTime return repaired → NETERR_NONE "
                     "(r6 was clobbered across InitRTC)\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
+
+    /* core0Loop @ RAM: after GetNetworkTime, `mov r4, r0` then printf then
+     * `cmp r4, #11`. Force r0 so the 24h success path is taken (host printf
+     * may still print a stale first arg). */
+    if (pc == 0x20000198u && a2bus_ntp_force_core0_ok) {
+        a2bus_ntp_force_core0_ok = 0;
+        cpu.r[0] = USB_GUEST_NETERR_NONE;
+        static int once;
+        if (!once++) {
+            fprintf(stderr,
+                    "[A2Bus] core0Loop: force GetNTP success (r4←NETERR_NONE)\n");
             fflush(stderr);
         }
         return 0;
@@ -446,27 +466,9 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
-    /* Already-joined warm-up is 100×sleep_ms(1); under dual-core a2bus that
-     * races BusLoop BUSY polls and previously triggered unstick→abort. Skip
-     * when link is UP — same outcome as firmware's early return. */
-    if (pc == USB_GUEST_CONNECT_WIFI) {
-        /* cyw43_tcpip_link_status: flags at state+0x90d, ip at state+0x8d8
-         * (pico2_debug cyw43_state @ 0x2000c13c). LINK_UP when (flags&5)==5
-         * and ip != 0. */
-        uint32_t state = 0x2000c13cu;
-        uint8_t flags = mem_read8(state + 0x90du);
-        uint32_t ip = mem_read32(state + 0x8d8u);
-        if ((flags & 0x05u) == 0x05u && ip != 0u) {
-            static int once;
-            if (!once++) {
-                fprintf(stderr,
-                        "[A2Bus] ConnectWifi: link already UP — skip warm-up sleep\n");
-                fflush(stderr);
-            }
-            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-            return 1;
-        }
-    }
+    /* Do not skip ConnectWifi warm-up when link is UP — that path is required
+     * by pico-sdk #915 and skipping it on a second RunNTP caused Abort/_exit.
+     * DoTestWifi long_cmd flag alone protects BUSY during the 90s wait. */
 
     /* Do not accelerate sleep_ms here — that burned DoTestWifi's 90s wait before
      * radio init finished. Guest timer advances with normal core stepping. */
