@@ -113,6 +113,9 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_FORMAT_IP_ADDR      0x10001cf8u /* FormatIPAddr */
 #define USB_GUEST_DO_TESTWIFI_AFTER_FMT 0x10001e1eu /* after FormatIPAddr x4 → exit */
 #define USB_GUEST_DO_TFTP_RUN         0x100025ccu /* DoTFTPRun */
+#define USB_GUEST_TFTP_STATE          0x20005370u /* tftp_state */
+#define USB_GUEST_DATABUFFER_SIZE     512u
+
 #define USB_GUEST_TEST_RESULT         0x200580a0u /* static TestResult_t in DoTestWifi */
 #define USB_GUEST_CYW43_STATE         0x2000c13cu
 #define USB_GUEST_DNS_SERVERS         0x2000cd74u
@@ -239,6 +242,157 @@ static int a2bus_write_ip_cstr(uint32_t dest, uint32_t ip_le)
     for (i = 0; i <= n; i++)
         mem_write8(dest + (uint32_t)i, (uint8_t)buf[i]);
     return n + 1;
+}
+
+/* Append a C string at guest dest; return address of next string slot. */
+static uint32_t a2bus_put_cstr(uint32_t dest, const char *s)
+{
+    uint32_t i = 0;
+    if (!s)
+        s = "";
+    for (;;) {
+        mem_write8(dest + i, (uint8_t)s[i]);
+        if (s[i] == '\0')
+            break;
+        i++;
+        if (i >= 200u) {
+            mem_write8(dest + i, 0);
+            break;
+        }
+    }
+    return dest + i + 1u;
+}
+
+/*
+ * Native DoTFTPStatus: critical_section (ldaexb) + Format* / sprintf path
+ * HardFaults core1 (PC="RunT…" from a status string word). Host-complete from
+ * tftp_state — same parameterBuffer + five dataBuffer C strings as firmware.
+ */
+static void a2bus_host_do_tftp_status(void)
+{
+    static const char *const status_msg[] = {
+        "Idle", "Starting", "Connecting to WIFI", "Requesting Server",
+        "Transferring", "Completing", "Completed"
+    };
+    uint32_t st = USB_GUEST_TFTP_STATE;
+    uint64_t start = ((uint64_t)mem_read32(st + 4u) << 32) | mem_read32(st);
+    uint32_t blocks = mem_read32(st + 20u);
+    uint32_t tsize = mem_read32(st + 24u);
+    uint32_t retries = mem_read32(st + 28u);
+    int32_t error = (int32_t)mem_read32(st + 32u);
+    uint8_t status = mem_read8(st + 36u);
+    uint8_t pb_max = mem_read8(USB_GUEST_PARAMETER_BUFFER + 2u);
+    uint32_t elapsed;
+    uint32_t dest;
+    uint32_t i;
+    uint8_t prog;
+    char tmp[64];
+
+    /* ClearError: drop ERRORFLAG + error nibble; leave BUSY for BusLoop. */
+    {
+        uint8_t r0 = mem_read8(USB_GUEST_REGISTERS);
+        mem_write8(USB_GUEST_REGISTERS, (uint8_t)(r0 & (uint8_t)~0x5Fu));
+    }
+
+    if (mem_read8(USB_GUEST_PARAMETER_BUFFER) != 0u) {
+        /* MFERR_INVALIDARG */
+        uint8_t r0 = mem_read8(USB_GUEST_REGISTERS);
+        mem_write8(USB_GUEST_REGISTERS, (uint8_t)((r0 & (uint8_t)~0x1Fu) | 0x40u | 0x0Au));
+        goto finish_ptrs;
+    }
+
+    elapsed = 0u;
+    if (start != 0u && timer_state.time_us >= start)
+        elapsed = (uint32_t)((timer_state.time_us - start) / 1000000ull);
+    if (elapsed > 0xffffu)
+        elapsed = 0xffffu;
+
+    if (status == 6u) /* TFTPSTATUS_COMPLETED */
+        mem_write8(USB_GUEST_PARAMETER_BUFFER, (uint8_t)(error == -1 ? 1 : (uint8_t)-1));
+    else
+        mem_write8(USB_GUEST_PARAMETER_BUFFER, 0);
+
+    if (blocks == 0xffffffffu || tsize == 0xffffffffu || (tsize >> 9) == 0u)
+        prog = 255u;
+    else if (blocks >= (tsize >> 9))
+        prog = pb_max;
+    else
+        prog = (uint8_t)((blocks * (uint32_t)pb_max) / (tsize >> 9));
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 1u, prog);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 2u, status);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 3u, (uint8_t)(int8_t)error);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 4u, (uint8_t)blocks);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 5u, (uint8_t)(blocks >> 8));
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 6u, (uint8_t)(blocks >> 16));
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 7u, (uint8_t)(blocks >> 24));
+    {
+        uint32_t r = retries > 0xffffu ? 0xffffu : retries;
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 8u, (uint8_t)r);
+        mem_write8(USB_GUEST_PARAMETER_BUFFER + 9u, (uint8_t)(r >> 8));
+    }
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 10u, (uint8_t)elapsed);
+    mem_write8(USB_GUEST_PARAMETER_BUFFER + 11u, (uint8_t)(elapsed >> 8));
+
+    for (i = 0; i < USB_GUEST_DATABUFFER_SIZE; i++)
+        mem_write8(USB_GUEST_DATA_BUFFER + i, 0);
+
+    dest = USB_GUEST_DATA_BUFFER;
+    if (status < 7u) {
+        if (status == 6u) {
+            snprintf(tmp, sizeof(tmp), "%s%s", status_msg[status],
+                     error == -1 ? " Successfully" : " with error");
+            dest = a2bus_put_cstr(dest, tmp);
+        } else {
+            dest = a2bus_put_cstr(dest, status_msg[status]);
+        }
+    } else {
+        dest = a2bus_put_cstr(dest, "");
+    }
+
+    if (blocks == 0xffffffffu) {
+        dest = a2bus_put_cstr(dest, "");
+    } else if (tsize == 0xffffffffu) {
+        snprintf(tmp, sizeof(tmp), "%u", blocks > 65536u ? 65536u : blocks);
+        dest = a2bus_put_cstr(dest, tmp);
+    } else {
+        uint32_t total = tsize / 512u;
+        unsigned pct = total ? (unsigned)((blocks * 1000u) / total) : 0u;
+        snprintf(tmp, sizeof(tmp), "%u/%u (%u.%u%%)",
+                 blocks > 65536u ? 65536u : blocks, total, pct / 10u, pct % 10u);
+        dest = a2bus_put_cstr(dest, tmp);
+    }
+
+    {
+        uint32_t r = retries > 99999u ? 99999u : retries;
+        snprintf(tmp, sizeof(tmp), "%u", r);
+        dest = a2bus_put_cstr(dest, tmp);
+    }
+    {
+        uint32_t e = elapsed > 99999u ? 99999u : elapsed;
+        snprintf(tmp, sizeof(tmp), "%us", e);
+        dest = a2bus_put_cstr(dest, tmp);
+    }
+
+    if (error == -1)
+        dest = a2bus_put_cstr(dest, "");
+    else if (error == 1)
+        dest = a2bus_put_cstr(dest, "Error:\n\rFile not found");
+    else if (error == -3)
+        dest = a2bus_put_cstr(dest, "Error:\n\rTimeout");
+    else if (error == -9)
+        dest = a2bus_put_cstr(dest, "Error:\n\rDNS failed");
+    else {
+        snprintf(tmp, sizeof(tmp), "Error:\n\rcode %d", (int)error);
+        dest = a2bus_put_cstr(dest, tmp);
+    }
+    (void)dest;
+
+finish_ptrs:
+    mem_write8(USB_GUEST_DATA_XFER_MODE, 0); /* MODE_LINEAR */
+    mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
+    mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
+    mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
+    mem_write8(USB_GUEST_REGISTERS + 1u, mem_read8(USB_GUEST_PARAMETER_BUFFER));
 }
 
 /*
@@ -636,16 +790,24 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
-    /* DoTFTPStatus builds dataBuffer via sprintf/strcpy while BUSY — same
-     * unstick hazard as DoTestWifi (HardFault PC="RunT…" / LOCKUP). */
+    /* Native DoTFTPStatus HardFaults (critical_section / Format* → PC="RunT…").
+     * Host-complete from tftp_state; keep long_cmd brief around the fill. */
     if (pc == 0x10002738u || pc == 0x20004578u) {
+        static uint8_t last_logged_status = 0xffu;
+        uint8_t st_now;
         if (!a2bus_long_cmd_active())
             a2bus_long_cmd_begin("DoTFTPStatus");
-        return 0;
-    }
-    if (pc == 0x10002836u && a2bus_long_cmd_active()) {
+        a2bus_host_do_tftp_status();
         a2bus_long_cmd_end();
-        return 0;
+        st_now = mem_read8(USB_GUEST_TFTP_STATE + 36u);
+        if (st_now != last_logged_status) {
+            last_logged_status = st_now;
+            fprintf(stderr, "[A2Bus] DoTFTPStatus host-complete (status=%u)\n",
+                    (unsigned)st_now);
+            fflush(stderr);
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
     }
 
     /* Do not skip ConnectWifi warm-up when link is UP — that path is required
