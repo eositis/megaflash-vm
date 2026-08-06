@@ -443,16 +443,33 @@ static int a2bus_wifi_hooks(void) {
         return 0; /* let guest InitRTC run */
     }
 
+    /*
+     * Second GetNetworkTime while RTC is already set: under a2bus, host
+     * __wrap_printf clobbers callee-saved r4 after GetNTP, so core0Loop's
+     * `cmp r4,#11` fails → 5‑minute retry → second RunNTP throws → abort →
+     * core0 at _exit. TestWifi/TFTP IPC never runs; CP shows junk IPs.
+     * Boot NTP already succeeded — skip further GetNetworkTime.
+     */
     if (pc == USB_GUEST_GET_NETWORK_TIME || pc == 0x200044b0u) {
+        if (mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
+            static int skip_once;
+            if (!skip_once++) {
+                fprintf(stderr,
+                        "[A2Bus] GetNetworkTime skipped — RTC already running "
+                        "(avoids second RunNTP abort)\n");
+                fflush(stderr);
+            }
+            cpu.r[0] = USB_GUEST_NETERR_NONE;
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
         a2bus_ntp_init_rtc_ok = 0; /* only set if InitRTC runs during this call */
         a2bus_ntp_force_core0_ok = 0;
         return 0;
     }
 
     /* GetNetworkTime keeps NETERR_NONE in r6 across InitRTC; aon_timer_start
-     * clobbers r6 under Thumb emu so core0Loop sees a pointer-sized "error",
-     * takes the 5‑minute retry path (often immediately), second RunNTP throws
-     * → abort → core0 parked at _exit → TestWifi/TFTP IPC never runs.
+     * clobbers r6 under Thumb emu so core0Loop sees a pointer-sized "error".
      * Success path branches to InitRTC then back to 0x100085c8 (mov r0,r6). */
     if (pc == USB_GUEST_GET_NETWORK_TIME_RET && a2bus_ntp_init_rtc_ok) {
         a2bus_ntp_init_rtc_ok = 0;
@@ -468,16 +485,15 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
-    /* core0Loop @ RAM: after GetNetworkTime, `mov r4, r0` then printf then
-     * `cmp r4, #11`. Force r0 so the 24h success path is taken (host printf
-     * may still print a stale first arg). */
-    if (pc == 0x20000198u && a2bus_ntp_force_core0_ok) {
+    /* core0Loop: `cmp r4,#11` AFTER printf. Host printf clobbers r4 (callee-
+     * saved); force here so the 24h path is taken, not the 5‑minute retry. */
+    if (pc == 0x200001a4u && a2bus_ntp_force_core0_ok) {
         a2bus_ntp_force_core0_ok = 0;
-        cpu.r[0] = USB_GUEST_NETERR_NONE;
+        cpu.r[4] = USB_GUEST_NETERR_NONE;
         static int once;
         if (!once++) {
             fprintf(stderr,
-                    "[A2Bus] core0Loop: force GetNTP success (r4←NETERR_NONE)\n");
+                    "[A2Bus] core0Loop: force cmp r4==NETERR_NONE after printf\n");
             fflush(stderr);
         }
         return 0;

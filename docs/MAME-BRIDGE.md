@@ -140,11 +140,13 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / empty gw/dns):** Causes and fixes:
 
-1. **GetNetworkTime r6 clobber** → core0 5‑minute retry / abort. Overlay repairs return + forces `core0Loop` success after NTP `InitRTC`.
-2. **BUSY unstick mid-DoTestWifi** → skip only while `a2bus_long_cmd_*` (not all `busy_wait` PCs — that hung MAME).
-3. **`FormatIPAddr` / `ip4addr_ntoa`+`strcpy` under Thumb emu** leave short non-NUL junk in `dataBuffer`; CP `PrintStringFromDataBuffer` then prints garbage / screen leftovers. Overlay **host-completes `FormatIPAddr`** and **always** rewrites the four IP strings from `testResult` (or live netif/DNS) after FormatIPAddr×4 — not only when the first byte is NUL.
+1. **GetNetworkTime r6 clobber** + **host printf clobbers core0Loop `r4`** → `cmp r4,#11` fails → 5‑minute retry → second `RunNTP` throws → core0 `_exit`. Overlay repairs return, forces `r4` at the **cmp** (after printf), and **skips further GetNetworkTime while RTC is already running**.
+2. **BUSY unstick mid-DoTestWifi** → skip only while `a2bus_long_cmd_*`.
+3. **`FormatIPAddr` / `ip4addr_ntoa`+`strcpy`** leave junk in `dataBuffer`. Overlay host-completes `FormatIPAddr` and always rewrites the four IP strings from `testResult`/netif.
 
-**TFTP:** `DoTFTPRun` also holds BUSY while waiting for core0 task start — long_cmd covers that wait. Transfer itself uses guest lwIP → CYW43 → TAP UDP NAT (same path as DNS/NTP).
+Without a live core0, TestWifi IPC never runs — FormatIPAddr never fills — CP shows leftovers. Fix (1) is required before (3) is visible.
+
+**TFTP:** Needs live core0 (same as TestWifi). `DoTFTPRun` long_cmd covers the startup wait; transfer uses guest lwIP → TAP UDP NAT.
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel).
 
