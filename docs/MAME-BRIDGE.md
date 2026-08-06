@@ -140,13 +140,11 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / empty gw/dns):** Causes and fixes:
 
-1. **GetNetworkTime r6 clobber** + **host printf clobbers core0Loop `r4`** → `cmp r4,#11` fails → 5‑minute retry → second `RunNTP` throws → core0 `_exit`. Overlay repairs return, forces `r4` at the **cmp** (after printf), and **skips further GetNetworkTime while RTC is already running**.
-2. **BUSY unstick mid-DoTestWifi** → skip only while `a2bus_long_cmd_*`.
-3. **`FormatIPAddr` / `ip4addr_ntoa`+`strcpy`** leave junk in `dataBuffer`. Overlay host-completes `FormatIPAddr` and always rewrites the four IP strings from `testResult`/netif.
+1. **GetNetworkTime / printf clobber `r4`** → second RunNTP abort. Skip GetNetworkTime while RTC running; force `r4` at cmp after printf.
+2. **BUSY unstick mid-DoTestWifi** — BusLoop RAM calls `__DoTestWifi_veneer`; long_cmd must begin on the **veneer and on core0 `TestWifi()`**, not flash-only. Also skip unstick while core0 PC is in TestWifi/RunTestWifi/ConnectWifi.
+3. **`FormatIPAddr` junk** — host-complete FormatIPAddr; always rewrite dataBuffer from testResult/netif.
 
-Without a live core0, TestWifi IPC never runs — FormatIPAddr never fills — CP shows leftovers. Fix (1) is required before (3) is visible.
-
-**TFTP:** Needs live core0 (same as TestWifi). `DoTFTPRun` long_cmd covers the startup wait; transfer uses guest lwIP → TAP UDP NAT.
+**TFTP:** Needs live core0 through the TestWifi path (same long_cmd / BUSY hold). `DoTFTPRun` long_cmd covers startup wait.
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel).
 

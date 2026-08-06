@@ -607,7 +607,9 @@ static int a2bus_wifi_hooks(void) {
         }
     }
 
-    /* Empty-SSID only: C++ EH hang. Configured SSID → native DoTestWifi. */
+    /* Empty-SSID only: C++ EH hang. Configured SSID → native DoTestWifi.
+     * DoCommand in BusLoop RAM calls via __DoTestWifi_veneer (0x20004548) —
+     * must begin long_cmd on the veneer too (flash-only begin was missed). */
     if (pc == USB_GUEST_DO_TEST_WIFI || pc == 0x20004548u) {
         if (mem_read8(USB_GUEST_WIFI_SSID) == 0u) {
             fprintf(stderr, "[A2Bus] DoTestWifi: SSID not set → NETERR_SSIDNOTSET\n");
@@ -621,10 +623,21 @@ static int a2bus_wifi_hooks(void) {
             cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
             return 1;
         }
-        /* Begin once on flash entry (veneer falls through to here). */
-        if (pc == USB_GUEST_DO_TEST_WIFI)
+        if (!a2bus_long_cmd_active())
             a2bus_long_cmd_begin("DoTestWifi");
         return 0; /* real DoTestWifi: IPC to core0, FormatIPAddr into dataBuffer */
+    }
+
+    /* Core0 TestWifi IPC — belt-and-suspenders long_cmd if DoTestWifi begin was
+     * missed. Keeps BUSY unstick from aborting FormatIPAddr. */
+    if (pc == USB_GUEST_TEST_WIFI) {
+        if (mem_read8(USB_GUEST_WIFI_SSID) == 0u) {
+            /* fall through to empty-SSID handler below */
+        } else {
+            if (!a2bus_long_cmd_active())
+                a2bus_long_cmd_begin("TestWifi");
+            return 0;
+        }
     }
 
     /* Empty-SSID GetNetworkTime / TestWifi (IPC) — fail fast (C++ EH hang). */

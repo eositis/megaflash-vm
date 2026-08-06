@@ -412,6 +412,22 @@ static int a2bus_busy_is_long_command(void)
     if (a2bus_long_cmd_active())
         return 1;
 
+    /*
+     * Core0 in TestWifi / RunTestWifi / ConnectWifi / CTestWifiTask while
+     * STATUS BUSY: DoTestWifi on core1 is sleep-waiting. Do not unstick.
+     * (long_cmd begin was previously missed on the RAM veneer path.)
+     */
+    if (c0pc >= 0x100085f4u && c0pc < 0x10008700u) /* TestWifi */
+        return 1;
+    if (c0pc >= 0x100012f4u && c0pc < 0x10001680u) /* NetworkPump::RunTestWifi */
+        return 1;
+    if (c0pc >= 0x10008bacu && c0pc < 0x10009000u) /* ConnectWifi / BeginRun */
+        return 1;
+    if (c0pc >= 0x10009374u && c0pc < 0x10009500u) /* CTestWifiTask */
+        return 1;
+    if (c0pc >= 0x10008ddcu && c0pc < 0x10009300u) /* CUDPTask pump / Evt* */
+        return 1;
+
     pc = cores[CORE1].r[15] & ~1u;
     /* Backup if begin hook missed: DoTestWifi / DoTFTP bodies only */
     if (pc >= 0x10001d1cu && pc <= 0x10001e60u)
