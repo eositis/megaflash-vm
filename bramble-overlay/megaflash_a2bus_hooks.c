@@ -151,6 +151,8 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_CTFTPRX_EVTSTART    0x10009ffcu /* CTFTPRXTask::EvtStart */
 #define USB_GUEST_CTFTPRX_STARTXFER   0x10009a28u /* CTFTPRXTask::StartTransfer */
 #define USB_GUEST_RUNTFTP_AFTER_HEAP  0x10001002u /* RunTFTP: cbz r6 (dir) after DebugPrintHeap */
+#define USB_GUEST_RUNTFTP              0x10000f98u /* NetworkPump::RunTFTP */
+#define USB_GUEST_RUNTFTP_EPILOGUE     0x10001104u /* RunTFTP: ldmia ... pc */
 #define USB_GUEST_WRAP_MALLOC         0x1000df04u /* __wrap_malloc */
 #define USB_GUEST_WRAP_FREE           0x1000df60u /* __wrap_free */
 #define USB_GUEST_CTFTPRX_CTOR        0x100099b8u /* CTFTPRXTask::CTFTPRXTask */
@@ -612,10 +614,15 @@ static int a2bus_tftp_cs_hooks(uint32_t pc) {
 
 /*
  * check_alloc is stubbed (no upper/lower bound check). Corrupted newlib freelist
- * can return a pointer into configBuffer; CTFTP* then BLX through a fake vtable
- * and core0 executes BSS (PC≈0x2000C0xx) with status stuck at Starting.
- * Bump from guest heap_end toward HeapLimit — never reuse freelist.
+ * can return a pointer into configBuffer during CTFTP* `new`; BLX through a fake
+ * vtable → core0 executes BSS (PC≈0x2000C0xx).
+ *
+ * ONLY bump-allocate while RunTFTP is active. Global bump + no-op free exhausted
+ * the ~125KB heap during cyw43/lwIP (alloc/free churn) and broke SmartPort
+ * ("MegaFlash not found" / no boot from flash volumes).
  */
+static int a2bus_tftp_bump_malloc;
+
 static uint32_t a2bus_host_bump_malloc(uint32_t size) {
     uint32_t end;
     uint32_t p;
@@ -643,23 +650,25 @@ static uint32_t a2bus_host_bump_malloc(uint32_t size) {
 }
 
 static int a2bus_malloc_hooks(uint32_t pc) {
+    if (!a2bus_tftp_bump_malloc) {
+        return 0;
+    }
     if (pc == USB_GUEST_WRAP_MALLOC) {
         uint32_t size = cpu.r[0];
         uint32_t p = a2bus_host_bump_malloc(size);
         static int logged;
         if (logged < 12) {
-            fprintf(stderr, "[A2Bus] host malloc(%u) → 0x%08X\n",
+            fprintf(stderr, "[A2Bus] TFTP bump malloc(%u) → 0x%08X\n",
                     (unsigned)size, p);
             fflush(stderr);
             logged++;
         }
-        /* __wrap_malloc normally mutex+malloc+check_alloc; return like check_alloc OK. */
         cpu.r[0] = p;
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
     if (pc == USB_GUEST_WRAP_FREE) {
-        /* Bump allocator — ignore free (lwIP/TFTP lifetimes are session-scoped). */
+        /* Session-scoped TFTP objects — ignore free while bump is active. */
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
@@ -983,6 +992,29 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
+    /* Gate bump-malloc to RunTFTP only (see a2bus_tftp_bump_malloc). */
+    if (pc == USB_GUEST_RUNTFTP) {
+        if (!a2bus_tftp_bump_malloc) {
+            a2bus_tftp_bump_malloc = 1;
+            fprintf(stderr, "[A2Bus] TFTP bump-malloc enabled for RunTFTP\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
+    if (pc == USB_GUEST_RUNTFTP_EPILOGUE && a2bus_tftp_bump_malloc) {
+        a2bus_tftp_bump_malloc = 0;
+        fprintf(stderr, "[A2Bus] TFTP bump-malloc disabled (RunTFTP done)\n");
+        fflush(stderr);
+        return 0;
+    }
+    /* EndLegacyOperation — clear bump if RunTFTP aborted via EH. */
+    if (pc == 0x10000724u && a2bus_tftp_bump_malloc) {
+        a2bus_tftp_bump_malloc = 0;
+        fprintf(stderr, "[A2Bus] TFTP bump-malloc disabled (EndLegacyOperation)\n");
+        fflush(stderr);
+        return 0;
+    }
+
     /* RunTFTP: after DebugPrintHeap, cbz r6 uses dir. Host printf can clobber
      * callee-saved r6 — restore from tftp_state.dir (download=0). */
     if (pc == USB_GUEST_RUNTFTP_AFTER_HEAP) {
@@ -1000,8 +1032,9 @@ static int a2bus_wifi_hooks(void) {
         static int once;
         if (!once++) {
             fprintf(stderr,
-                    "[A2Bus] CTFTPRXTask ctor (unit=%u host bump malloc active)\n",
-                    (unsigned)mem_read32(USB_GUEST_TFTP_STATE + 16u));
+                    "[A2Bus] CTFTPRXTask ctor (unit=%u bump=%d)\n",
+                    (unsigned)mem_read32(USB_GUEST_TFTP_STATE + 16u),
+                    a2bus_tftp_bump_malloc);
             fflush(stderr);
         }
         return 0;
