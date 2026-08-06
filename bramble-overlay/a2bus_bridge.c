@@ -370,11 +370,11 @@ static int a2bus_busy_is_long_command(void)
     if (pc >= 0x10001d1cu && pc <= 0x10001e60u) {
         return 1;
     }
-    /* sleep_ms / sleep_us / time_reached wait inside long cmds */
+    /* sleep_ms / sleep_us / time_reached / timer_busy_wait inside long cmds */
     if (pc >= 0x1000be78u && pc <= 0x1000beb8u) {
         return 1;
     }
-    if (pc >= 0x1000c078u && pc <= 0x1000c0c0u) {
+    if (pc >= 0x1000c024u && pc <= 0x1000c0c0u) {
         return 1;
     }
     /* DoTFTPRun / DoTFTPStatus */

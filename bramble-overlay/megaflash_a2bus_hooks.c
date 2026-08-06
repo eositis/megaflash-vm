@@ -109,6 +109,8 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_TEST_WIFI           0x100085f4u /* TestWifi */
 #define USB_GUEST_DO_TEST_WIFI        0x10001d1cu /* DoTestWifi (core1) */
 #define USB_GUEST_GET_NETWORK_TIME    0x1000859cu /* GetNetworkTime */
+#define USB_GUEST_GET_NETWORK_TIME_RET 0x100085c8u /* GetNetworkTime: mov r0,r6; return */
+#define USB_GUEST_DO_TESTWIFI_AFTER_FMT 0x10001e1eu /* after FormatIPAddr x4 → exit */
 #define USB_GUEST_CONNECT_WIFI        0x10008bacu /* CUDPTask::ConnectWifi */
 #define USB_GUEST_INIT_CYW43          0x100088f4u /* CUDPTask::InitCyw43 */
 #define USB_GUEST_CYW43_ARCH_INIT     0x1001b030u /* cyw43_arch_init (InitPicoLed) */
@@ -137,6 +139,9 @@ static uint32_t a2bus_mutex_spinlock_byte = 0x20061f00u;
 static int a2bus_rtc_valid;
 static time_t a2bus_rtc_base_local;
 static time_t a2bus_rtc_host_at_set;
+/* Set when InitRTC runs after a successful RunNTP; used to repair GetNetworkTime's
+ * return (r6 clobbered under emu across aon_timer_start → garbage != NETERR_NONE). */
+static int a2bus_ntp_init_rtc_ok;
 
 static const int32_t a2bus_tzhour[] = {
     -12,-11,-10,-9,-9,-8,-7,-6,-5,-4,-3,-3,-2,-1,0,1,2,3,3,4,4,5,5,5,6,6,7,8,8,9,9,10,10,11,12,12,13,14
@@ -351,10 +356,88 @@ static int a2bus_wifi_hooks(void) {
     a2bus_ensure_busloop_core1();
     uint32_t pc = cpu.r[15] & ~1u;
 
-    /* Track firmware InitRTC so host DoGetTimeString matches guest calendar. */
+    /* Track firmware InitRTC so host DoGetTimeString matches guest calendar.
+     * AAPCS: time_t is 64-bit in r0:r1, timezone offset in r2. */
     if (pc == USB_GUEST_INIT_RTC) {
-        a2bus_apply_init_rtc((time_t)cpu.r[0], (int32_t)cpu.r[1]);
+        a2bus_apply_init_rtc((time_t)cpu.r[0], (int32_t)cpu.r[2]);
+        /* Plausible Unix epoch → treat as successful NTP InitRTC for return repair. */
+        if ((uint32_t)cpu.r[0] > 1700000000u) {
+            a2bus_ntp_init_rtc_ok = 1;
+        }
         return 0; /* let guest InitRTC run */
+    }
+
+    if (pc == USB_GUEST_GET_NETWORK_TIME || pc == 0x200044b0u) {
+        a2bus_ntp_init_rtc_ok = 0; /* only set if InitRTC runs during this call */
+        return 0;
+    }
+
+    /* GetNetworkTime keeps NETERR_NONE in r6 across InitRTC; aon_timer_start
+     * clobbers r6 under Thumb emu so core0Loop sees a pointer-sized "error",
+     * takes the 5‑minute retry path (often immediately), second RunNTP throws
+     * → abort → core0 parked at _exit → TestWifi/TFTP IPC never runs. */
+    if (pc == USB_GUEST_GET_NETWORK_TIME_RET && a2bus_ntp_init_rtc_ok) {
+        a2bus_ntp_init_rtc_ok = 0;
+        cpu.r[6] = USB_GUEST_NETERR_NONE;
+        cpu.r[0] = USB_GUEST_NETERR_NONE;
+        static int fixed;
+        if (!fixed++) {
+            fprintf(stderr,
+                    "[A2Bus] GetNetworkTime return repaired → NETERR_NONE "
+                    "(r6 was clobbered across InitRTC)\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
+
+    /* After FormatIPAddr fills dataBuffer — log what Apple will print.
+     * If guest ntoa/strcpy left empties, fill from testResult IP words (same
+     * data EvtStart wrote; not fabricated status). */
+    if (pc == USB_GUEST_DO_TESTWIFI_AFTER_FMT) {
+        char ip[4][20];
+        uint32_t off = 0;
+        int s;
+        uint32_t test_result = 0x200580a0u; /* static TestResult_t in DoTestWifi */
+        for (s = 0; s < 4; s++) {
+            int i;
+            for (i = 0; i < 19; i++) {
+                uint8_t c = mem_read8(USB_GUEST_DATA_BUFFER + off + (uint32_t)i);
+                if (c == 0) {
+                    ip[s][i] = '\0';
+                    off += (uint32_t)i + 1u;
+                    break;
+                }
+                ip[s][i] = (char)(c & 0x7fu);
+            }
+            if (i >= 19) {
+                ip[s][19] = '\0';
+                off += 19;
+            }
+        }
+        if (ip[0][0] == '\0') {
+            off = 0;
+            for (s = 0; s < 4; s++) {
+                uint32_t w = mem_read32(test_result + (uint32_t)s * 4u);
+                int n = snprintf(ip[s], sizeof(ip[s]), "%u.%u.%u.%u",
+                                 (unsigned)(w & 0xffu),
+                                 (unsigned)((w >> 8) & 0xffu),
+                                 (unsigned)((w >> 16) & 0xffu),
+                                 (unsigned)((w >> 24) & 0xffu));
+                int i;
+                for (i = 0; i <= n; i++) {
+                    mem_write8(USB_GUEST_DATA_BUFFER + off + (uint32_t)i,
+                               (uint8_t)ip[s][i]);
+                }
+                off += (uint32_t)n + 1u;
+            }
+            fprintf(stderr,
+                    "[A2Bus] DoTestWifi FormatIPAddr empty — filled from testResult\n");
+        }
+        fprintf(stderr,
+                "[A2Bus] DoTestWifi dataBuffer: ip='%s' mask='%s' gw='%s' dns='%s'\n",
+                ip[0], ip[1], ip[2], ip[3]);
+        fflush(stderr);
+        return 0;
     }
 
     /* Do not accelerate sleep_ms here — that burned DoTestWifi's 90s wait before

@@ -138,7 +138,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi IP lines garbled / zero-flood:** was caused by host-completing `DoTestWifi` (wrong approach) plus DATA-path bugs. Correct model: pump both cores while BUSY; let firmware `FormatIPAddr` fill `dataBuffer`. Guest-path DATA READ must return the pre-advance register byte.
 
-**CP Test Wifi OK but IP fields empty / “AG” junk:** `parameterBuffer[0]==NETERR_NONE` is independent of the IP strings. Empty lines mean `dataBuffer` never got `FormatIPAddr` text. Common a2bus causes: (1) **BUSY unstick** mid-`DoTestWifi` (Apple saw idle PARAM before FormatIPAddr); (2) **SDPCM credit STALL** after DHCP so DNS TX fails → C++ throw kills core0 before TestWifi finishes; (3) newlib `strcpy` word-path under Thumb emu. Fixes: do not unstick while core1 is in DoTestWifi/sleep; refresh SDPCM bus credits after every WLAN TX; host `strcpy` accel. Not a place for fabricated CP IP strings.
+**CP Test Wifi OK but IP fields garbled / blank:** Often core0 already aborted after boot NTP: `GetNetworkTime` returns a garbage value (callee-saved `r6` clobbered across `InitRTC`→`aon_timer`), so `core0Loop` retries NTP immediately, second `RunNTP` throws → `_exit`. Overlay repairs the return to `NETERR_NONE` after a successful NTP `InitRTC`. Also dumps/`fills` `dataBuffer` after `FormatIPAddr` if guest strings are empty.
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel).
 
