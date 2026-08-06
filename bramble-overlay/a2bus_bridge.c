@@ -45,6 +45,38 @@ static a2bus_bridge_t br = {
     .pump_steps = 500000u,
 };
 
+static int g_long_cmd_depth;
+static const char *g_long_cmd_why;
+
+void a2bus_long_cmd_begin(const char *why)
+{
+    g_long_cmd_depth++;
+    if (why)
+        g_long_cmd_why = why;
+    if (g_long_cmd_depth == 1) {
+        fprintf(stderr, "[A2Bus] long CMD begin (%s) — BUSY unstick suppressed\n",
+                why ? why : "?");
+        fflush(stderr);
+    }
+}
+
+void a2bus_long_cmd_end(void)
+{
+    if (g_long_cmd_depth > 0)
+        g_long_cmd_depth--;
+    if (g_long_cmd_depth == 0) {
+        fprintf(stderr, "[A2Bus] long CMD end (%s)\n",
+                g_long_cmd_why ? g_long_cmd_why : "?");
+        fflush(stderr);
+        g_long_cmd_why = NULL;
+    }
+}
+
+int a2bus_long_cmd_active(void)
+{
+    return g_long_cmd_depth > 0;
+}
+
 /* MegaFlash BSS (pico2_debug) — keep in sync with megaflash.elf */
 #define MF_DATA_BUF   0x2000caccu
 #define MF_DATA_IDX   0x2000ccccu
@@ -361,26 +393,40 @@ static int mf_native_mode(void)
 /*
  * DoTestWifi / TFTP sleep-wait with STATUS BUSY for up to ~90s while core0
  * runs IPC. Unsticking mid-command clears BUSY before FormatIPAddr fills
- * dataBuffer — CP then shows NETERR garbage / empty IP lines ("AG").
+ * dataBuffer — CP then shows NETERR garbage / empty IP lines ("BXX"/"AN").
+ *
+ * Prefer a2bus_long_cmd_* (set on DoTestWifi/DoTFTP entry). PC ranges are a
+ * backup: Apple polls STATUS while firmware sits in sleep_until (0x1000bdc4),
+ * which was missed when the window started at sleep_ms (0x1000be78).
  */
 static int a2bus_busy_is_long_command(void)
 {
-    uint32_t pc = cores[CORE1].r[15] & ~1u;
+    uint32_t pc;
+
+    if (a2bus_long_cmd_active())
+        return 1;
+
+    pc = cores[CORE1].r[15] & ~1u;
     /* DoTestWifi */
-    if (pc >= 0x10001d1cu && pc <= 0x10001e60u) {
+    if (pc >= 0x10001d1cu && pc <= 0x10001e60u)
         return 1;
-    }
-    /* sleep_ms / sleep_us / time_reached / timer_busy_wait inside long cmds */
-    if (pc >= 0x1000be78u && pc <= 0x1000beb8u) {
+    /* sleep_until (incl. lock path at 0x1000BE42 seen in logs) */
+    if (pc >= 0x1000bdc4u && pc <= 0x1000be74u)
         return 1;
-    }
-    if (pc >= 0x1000c024u && pc <= 0x1000c0c0u) {
+    /* sleep_ms */
+    if (pc >= 0x1000be78u && pc <= 0x1000bf14u)
         return 1;
-    }
+    /* busy_wait_until / busy_wait_us_32 */
+    if (pc >= 0x1000bf18u && pc <= 0x1000c030u)
+        return 1;
+    if (pc >= 0x1000c024u && pc <= 0x1000c0c0u)
+        return 1;
+    /* strcpy host-accel / nearby (log: unstick at 0x1002A5D0) */
+    if (pc >= 0x1002a5c0u && pc <= 0x1002a5f8u)
+        return 1;
     /* DoTFTPRun / DoTFTPStatus */
-    if (pc >= 0x10002700u && pc <= 0x10002900u) {
+    if (pc >= 0x10002700u && pc <= 0x10002900u)
         return 1;
-    }
     return 0;
 }
 
@@ -389,13 +435,28 @@ static void a2bus_unstick_busloop(const char *why)
     uint32_t c1pc = cores[CORE1].r[15] & ~1u;
     uint8_t st = peek_reg(0);
     if ((st & MF_BUSYFLAG) != 0 && a2bus_busy_is_long_command()) {
-        static int skip_logged;
-        if (skip_logged < 4) {
-            skip_logged++;
+        static unsigned skip_logged;
+        if (skip_logged < 8u || (skip_logged % 200u) == 0u) {
             fprintf(stderr,
-                    "[A2Bus] skip unstick (%s) — long cmd core1PC=0x%08X\n",
-                    why, c1pc);
+                    "[A2Bus] skip unstick (%s) — long cmd core1PC=0x%08X depth=%d\n",
+                    why, c1pc, a2bus_long_cmd_active());
             fflush(stderr);
+        }
+        skip_logged++;
+        /* Extra pump so core0 can finish TestWifi while BUSY stays set. */
+        if (br.pump)
+            br.pump(br.pump_steps);
+        else {
+            unsigned i;
+            for (i = 0; i < br.pump_steps; i++) {
+                if (!cpu_is_halted_core(CORE0))
+                    cpu_step_core(CORE0);
+                if (!cpu_is_halted_core(CORE1))
+                    cpu_step_core(CORE1);
+                pio_step();
+                if ((peek_reg(0) & MF_BUSYFLAG) == 0)
+                    break;
+            }
         }
         return;
     }

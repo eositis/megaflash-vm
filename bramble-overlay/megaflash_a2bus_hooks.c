@@ -440,6 +440,34 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
+    /* DoTestWifi common exit (ClearError / timeout / CheckPicoW fail). */
+    if (pc == 0x10001d2au && a2bus_long_cmd_active()) {
+        a2bus_long_cmd_end();
+        return 0;
+    }
+
+    /* Already-joined warm-up is 100×sleep_ms(1); under dual-core a2bus that
+     * races BusLoop BUSY polls and previously triggered unstick→abort. Skip
+     * when link is UP — same outcome as firmware's early return. */
+    if (pc == USB_GUEST_CONNECT_WIFI) {
+        /* cyw43_tcpip_link_status: flags at state+0x90d, ip at state+0x8d8
+         * (pico2_debug cyw43_state @ 0x2000c13c). LINK_UP when (flags&5)==5
+         * and ip != 0. */
+        uint32_t state = 0x2000c13cu;
+        uint8_t flags = mem_read8(state + 0x90du);
+        uint32_t ip = mem_read32(state + 0x8d8u);
+        if ((flags & 0x05u) == 0x05u && ip != 0u) {
+            static int once;
+            if (!once++) {
+                fprintf(stderr,
+                        "[A2Bus] ConnectWifi: link already UP — skip warm-up sleep\n");
+                fflush(stderr);
+            }
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+    }
+
     /* Do not accelerate sleep_ms here — that burned DoTestWifi's 90s wait before
      * radio init finished. Guest timer advances with normal core stepping. */
 
@@ -519,6 +547,9 @@ static int a2bus_wifi_hooks(void) {
             cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
             return 1;
         }
+        /* Begin once on flash entry (veneer falls through to here). */
+        if (pc == USB_GUEST_DO_TEST_WIFI)
+            a2bus_long_cmd_begin("DoTestWifi");
         return 0; /* real DoTestWifi: IPC to core0, FormatIPAddr into dataBuffer */
     }
 

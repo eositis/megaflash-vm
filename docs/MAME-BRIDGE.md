@@ -138,7 +138,10 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **CP Test Wifi IP lines garbled / zero-flood:** was caused by host-completing `DoTestWifi` (wrong approach) plus DATA-path bugs. Correct model: pump both cores while BUSY; let firmware `FormatIPAddr` fill `dataBuffer`. Guest-path DATA READ must return the pre-advance register byte.
 
-**CP Test Wifi OK but IP fields garbled / blank:** Often core0 already aborted after boot NTP: `GetNetworkTime` returns a garbage value (callee-saved `r6` clobbered across `InitRTC`→`aon_timer`), so `core0Loop` retries NTP immediately, second `RunNTP` throws → `_exit`. Overlay repairs the return to `NETERR_NONE` after a successful NTP `InitRTC`. Also dumps/`fills` `dataBuffer` after `FormatIPAddr` if guest strings are empty.
+**CP Test Wifi OK but IP fields garbled / blank (`BXX` / `AN` / empty gw/dns):** Two causes:
+
+1. **GetNetworkTime r6 clobber** after boot NTP → core0 aborts before TestWifi IPC (overlay repairs return to `NETERR_NONE`).
+2. **BUSY unstick mid-DoTestWifi** while core1 sits in `sleep_until` (`0x1000bdc4`–`0x1000be74`, e.g. PC=`0x1000BE42`) — earlier skip windows started at `sleep_ms` (`0x1000be78`) and missed it. Force-clearing BUSY lets Apple read `dataBuffer` before `FormatIPAddr`; resetting core1 mid-wait then cascades to core0 `abort` / HardFault (`PC=0x546E7552` = `"RunT…"`). Overlay now sets `a2bus_long_cmd_begin/end` around `DoTestWifi`, never unsticks while that flag (or the full sleep/wait PC range) is active, skips already-UP `ConnectWifi` warm-up, and dumps/`fills` `dataBuffer` after `FormatIPAddr` if guest strings are empty.
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel).
 

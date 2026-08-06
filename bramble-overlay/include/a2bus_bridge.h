@@ -34,4 +34,13 @@ void a2bus_bridge_poll(void);
 /* Resolve "registers" from an ELF (OBJECT/BSS); 0 on failure. */
 uint32_t a2bus_bridge_regs_from_elf(const char *elf_path);
 
+/*
+ * DoTestWifi / DoTFTP hold CMD BUSY for seconds while Apple polls STATUS.
+ * Nesting count: while >0, a2bus_bridge must NOT clear BUSY on timeout —
+ * that aborts FormatIPAddr and leaves the control panel with empty/junk IPs.
+ */
+void a2bus_long_cmd_begin(const char *why);
+void a2bus_long_cmd_end(void);
+int  a2bus_long_cmd_active(void);
+
 #endif /* A2BUS_BRIDGE_H */
