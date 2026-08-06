@@ -791,20 +791,31 @@ static int a2bus_wifi_hooks(void) {
     }
 
     /* Native DoTFTPStatus HardFaults (critical_section / Format* → PC="RunT…").
-     * Host-complete from tftp_state; keep long_cmd brief around the fill. */
+     * Host-complete from tftp_state; no long_cmd — fill is instant and must not
+     * spam BUSY suppress (that starved core0 RunTFTP / mallinfo). */
     if (pc == 0x10002738u || pc == 0x20004578u) {
         static uint8_t last_logged_status = 0xffu;
         uint8_t st_now;
-        if (!a2bus_long_cmd_active())
-            a2bus_long_cmd_begin("DoTFTPStatus");
         a2bus_host_do_tftp_status();
-        a2bus_long_cmd_end();
         st_now = mem_read8(USB_GUEST_TFTP_STATE + 36u);
         if (st_now != last_logged_status) {
             last_logged_status = st_now;
             fprintf(stderr, "[A2Bus] DoTFTPStatus host-complete (status=%u)\n",
                     (unsigned)st_now);
             fflush(stderr);
+        }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+
+    /* DebugPrintHeapState → mallinfo freelist hang; print host-side estimate. */
+    if (pc == 0x10004f60u) {
+        static int heap_logged;
+        if (heap_logged < 8) {
+            fprintf(stderr,
+                    "[A2Bus] DebugPrintHeapState skipped (mallinfo unsafe under emu)\n");
+            fflush(stderr);
+            heap_logged++;
         }
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;

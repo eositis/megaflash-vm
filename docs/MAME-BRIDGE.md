@@ -151,7 +151,9 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **TFTP locks MAME for minutes (BUSY, empty Status, no TAP UDP):** CP `StartTFTP(flag=1)` calls `SaveTFTPLastServer` → newlib `strcmp` word/IT path infinite-loops under Thumb emu (PC stuck in `0x1002a5xx`). Host-accelerate `strcmp`/`strncpy` (same class as `strlen`/`strcpy`); a2bus also host-completes `SaveTFTPLastServer` and persists `megaflash-user-config.bin`.
 
-**TFTP Status HardFault (`PC=0x546E7552` / `"RunT…"`) after DoTFTPRun:** native `DoTFTPStatus` (critical_section ldaexb + Format*/sprintf) corrupts core1 PC. Host-complete `DoTFTPStatus` from live `tftp_state` (parameterBuffer + five dataBuffer strings).
+**TFTP Status HardFault (`PC=0x546E7552` / `"RunT…"`) after DoTFTPRun:** native `DoTFTPStatus` (critical_section ldaexb + Format*/sprintf) corrupts core1 PC. Host-complete `DoTFTPStatus` from live `tftp_state` (parameterBuffer + five dataBuffer strings). Do not wrap Status in `long_cmd` — Status is polled continuously and starved core0.
+
+**TFTP stuck at Status=`Starting` (no TAP UDP :69):** `RunTFTP` prints then `DebugPrintHeapState` → newlib `mallinfo` freelist walk hangs under Thumb emu (`PC≈0x1002ABAA`). Skip `__malloc_update_mallinfo`; stub `DebugPrintHeapState`. Guest lwIP then continues to RRQ → CYW43 → TAP UDP NAT (same path as DNS/NTP).
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel). Also appears when BusLoop HardFaulted after TestWifi — Status never refreshed.
 
