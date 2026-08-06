@@ -153,12 +153,13 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **TFTP Status HardFault (`PC=0x546E7552` / `"RunT…"`) after DoTFTPRun:** native `DoTFTPStatus` (critical_section ldaexb + Format*/sprintf) corrupts core1 PC. Host-complete `DoTFTPStatus` from live `tftp_state` (parameterBuffer + five dataBuffer strings). Do not wrap Status in `long_cmd` — Status is polled continuously and starved core0.
 
-**TFTP stuck at Status=`Starting` (no TAP UDP :69):** Two causes under a2bus:
+**TFTP stuck at Status=`Starting` (no TAP UDP :69):** Causes under a2bus (in order found):
 
 1. `DebugPrintHeapState` → newlib `mallinfo` freelist walk hangs (`PC≈0x1002ABAA`). Skip `__malloc_update_mallinfo`; stub `DebugPrintHeapState`.
-2. `CTFTPTask` ctor → `UpdateTFTPState` → `tftp_critical_section_enter_blocking` spins when `tftp_cs.spin_lock` is null/out of the ldaexb force-free range (status never leaves STARTING). Host-complete tftp CS enter/exit; ensure a valid spin-lock byte; fix `hw_claim_unused` to scan free bits (was always returning the range start).
+2. `UpdateTFTPState` → `tftp_critical_section_enter_blocking` spins on bad `tftp_cs.spin_lock*`. Host-complete tftp CS enter/exit; fix `hw_claim_unused` free-bit scan.
+3. Corrupted newlib freelist + stubbed `check_alloc` → `__wrap_malloc` returns a pointer into `configBuffer`; CTFTP* BLX through a fake vtable → core0 executes BSS (`PC≈0x2000C0xx`). **Host bump-allocator** for `__wrap_malloc`/`__wrap_free` from `heap_end` toward `HeapLimit`.
 
-Guest lwIP then continues to RRQ → CYW43 → TAP UDP NAT (same path as DNS/NTP).
+DNS/NTP TAP UDP NAT already proves host sockets work; once RRQ is sent, `192.168.0.10:69` uses the same NAT path (guest is on `192.168.4.0/24`, so LAN TFTP is routed via the fake gw then NAT’d).
 
 **TFTP Status shows leftover hostname (e.g. `192.`):** was caused by stubbing `_svfprintf_r` to return 0 — `sprintf` then only wrote a leading NUL, so `DoTFTPStatus` left prior dataBuffer text. Host-path `sprintf` now formats into guest RAM (same class as `strcpy` accel). Also appears when BusLoop HardFaulted after TestWifi — Status never refreshed.
 

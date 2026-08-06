@@ -151,6 +151,12 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_CTFTPRX_EVTSTART    0x10009ffcu /* CTFTPRXTask::EvtStart */
 #define USB_GUEST_CTFTPRX_STARTXFER   0x10009a28u /* CTFTPRXTask::StartTransfer */
 #define USB_GUEST_RUNTFTP_AFTER_HEAP  0x10001002u /* RunTFTP: cbz r6 (dir) after DebugPrintHeap */
+#define USB_GUEST_WRAP_MALLOC         0x1000df04u /* __wrap_malloc */
+#define USB_GUEST_WRAP_FREE           0x1000df60u /* __wrap_free */
+#define USB_GUEST_CTFTPRX_CTOR        0x100099b8u /* CTFTPRXTask::CTFTPRXTask */
+#define USB_GUEST_HEAP_END_PTR        0x2000d1e4u /* _sbrk heap_end */
+#define USB_GUEST_HEAP_BASE           0x20061628u /* __end__ */
+#define USB_GUEST_HEAP_LIMIT          0x20080000u /* __HeapLimit / check_alloc */
 
 /* Unlocked mutex owner = -1; spinlock slot in guest SRAM for [0]. */
 static uint32_t a2bus_mutex_spinlock_byte = 0x20061f00u;
@@ -584,7 +590,12 @@ static void a2bus_ensure_tftp_cs(void) {
 
 static int a2bus_tftp_cs_hooks(uint32_t pc) {
     if (pc == USB_GUEST_TFTP_CS_ENTER_V || pc == USB_GUEST_TFTP_CS_ENTER) {
+        static int logged;
         a2bus_ensure_tftp_cs();
+        if (!logged++) {
+            fprintf(stderr, "[A2Bus] tftp_cs enter host-complete\n");
+            fflush(stderr);
+        }
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
@@ -593,6 +604,62 @@ static int a2bus_tftp_cs_hooks(uint32_t pc) {
         if (lock != 0u) {
             mem_write8(lock, 0);
         }
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    return 0;
+}
+
+/*
+ * check_alloc is stubbed (no upper/lower bound check). Corrupted newlib freelist
+ * can return a pointer into configBuffer; CTFTP* then BLX through a fake vtable
+ * and core0 executes BSS (PC≈0x2000C0xx) with status stuck at Starting.
+ * Bump from guest heap_end toward HeapLimit — never reuse freelist.
+ */
+static uint32_t a2bus_host_bump_malloc(uint32_t size) {
+    uint32_t end;
+    uint32_t p;
+    uint32_t i;
+    if (size == 0u) {
+        size = 1u;
+    }
+    size = (size + 7u) & ~7u;
+    end = mem_read32(USB_GUEST_HEAP_END_PTR);
+    if (end < USB_GUEST_HEAP_BASE || end > USB_GUEST_HEAP_LIMIT) {
+        end = USB_GUEST_HEAP_BASE;
+    }
+    if (end + size > USB_GUEST_HEAP_LIMIT) {
+        fprintf(stderr, "[A2Bus] host malloc OOM size=%u end=0x%08X\n",
+                (unsigned)size, end);
+        fflush(stderr);
+        return 0u;
+    }
+    p = end;
+    for (i = 0; i < size; i++) {
+        mem_write8(p + i, 0);
+    }
+    mem_write32(USB_GUEST_HEAP_END_PTR, end + size);
+    return p;
+}
+
+static int a2bus_malloc_hooks(uint32_t pc) {
+    if (pc == USB_GUEST_WRAP_MALLOC) {
+        uint32_t size = cpu.r[0];
+        uint32_t p = a2bus_host_bump_malloc(size);
+        static int logged;
+        if (logged < 12) {
+            fprintf(stderr, "[A2Bus] host malloc(%u) → 0x%08X\n",
+                    (unsigned)size, p);
+            fflush(stderr);
+            logged++;
+        }
+        /* __wrap_malloc normally mutex+malloc+check_alloc; return like check_alloc OK. */
+        cpu.r[0] = p;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == USB_GUEST_WRAP_FREE) {
+        /* Bump allocator — ignore free (lwIP/TFTP lifetimes are session-scoped). */
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
@@ -912,10 +979,31 @@ static int a2bus_wifi_hooks(void) {
         return 1;
     }
 
+    if (a2bus_malloc_hooks(pc)) {
+        return 1;
+    }
+
     /* RunTFTP: after DebugPrintHeap, cbz r6 uses dir. Host printf can clobber
      * callee-saved r6 — restore from tftp_state.dir (download=0). */
     if (pc == USB_GUEST_RUNTFTP_AFTER_HEAP) {
-        cpu.r[6] = mem_read32(USB_GUEST_TFTP_STATE + 12u); /* dir */
+        uint32_t dir = mem_read32(USB_GUEST_TFTP_STATE + 12u);
+        static int once;
+        if (!once++) {
+            fprintf(stderr, "[A2Bus] RunTFTP after heap: force r6=dir=%u\n",
+                    (unsigned)dir);
+            fflush(stderr);
+        }
+        cpu.r[6] = dir;
+        return 0;
+    }
+    if (pc == USB_GUEST_CTFTPRX_CTOR) {
+        static int once;
+        if (!once++) {
+            fprintf(stderr,
+                    "[A2Bus] CTFTPRXTask ctor (unit=%u host bump malloc active)\n",
+                    (unsigned)mem_read32(USB_GUEST_TFTP_STATE + 16u));
+            fflush(stderr);
+        }
         return 0;
     }
     if (pc == USB_GUEST_CTFTPRX_EVTSTART) {
@@ -933,6 +1021,16 @@ static int a2bus_wifi_hooks(void) {
             fflush(stderr);
         }
         return 0;
+    }
+    /* Detect jump into configBuffer (bad malloc / vtable). */
+    if (pc >= 0x2000bef4u && pc < 0x2000c0f4u) {
+        static int once;
+        if (!once++) {
+            fprintf(stderr,
+                    "[A2Bus] WARN: core0 PC in configBuffer 0x%08X (bad heap/vtable?)\n",
+                    pc);
+            fflush(stderr);
+        }
     }
 
     if (a2bus_stub_cyw43()) {
