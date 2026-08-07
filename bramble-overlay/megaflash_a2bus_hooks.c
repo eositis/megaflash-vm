@@ -714,6 +714,39 @@ static void a2bus_tftp_finish_guest(uint32_t self, uint32_t error_code,
     mem_write8(st + 36u, status);
 }
 
+/* Host-apply spends wall time in C; guest TIMER only ticks on emu steps / WFI.
+ * Advance TIMER0 from host monotonic so DoTFTPStatus Time + delay_ms move. */
+static int a2bus_tftp_timer_armed;
+static struct timespec a2bus_tftp_timer_last;
+
+static void a2bus_tftp_advance_guest_timer(void)
+{
+    struct timespec now;
+    uint64_t delta_us;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return;
+    if (!a2bus_tftp_timer_armed) {
+        a2bus_tftp_timer_last = now;
+        a2bus_tftp_timer_armed = 1;
+        return;
+    }
+    delta_us = (uint64_t)(now.tv_sec - a2bus_tftp_timer_last.tv_sec) * 1000000ull;
+    if (now.tv_nsec >= a2bus_tftp_timer_last.tv_nsec)
+        delta_us += (uint64_t)(now.tv_nsec - a2bus_tftp_timer_last.tv_nsec) / 1000ull;
+    else {
+        delta_us -= 1000000ull;
+        delta_us += (uint64_t)(now.tv_nsec + 1000000000L - a2bus_tftp_timer_last.tv_nsec)
+                    / 1000ull;
+    }
+    a2bus_tftp_timer_last = now;
+    if (delta_us == 0ull)
+        return;
+    if (delta_us > 50000ull) /* match WFI wall-clock cap */
+        delta_us = 50000ull;
+    timer_tick((uint32_t)delta_us);
+}
+
 /*
  * TAP TFTP proxy calls this instead of delivering DATA through CYW43.
  * Writes SPI backing + updates tftp_state / CTFTPRXTask so the CP UI moves
@@ -730,6 +763,7 @@ static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
 
     if (!a2bus_bridge_active() || !payload || len < 4)
         return 0;
+    a2bus_tftp_advance_guest_timer();
     op = ((uint16_t)payload[0] << 8) | payload[1];
     if (op != 3u) /* DATA only; OACK still via guest if ever used */
         return 0;
@@ -859,6 +893,7 @@ static void a2bus_tftp_bump_enable(void) {
         a2bus_tftp_bump_heap_saved = mem_read32(USB_GUEST_HEAP_END_PTR);
         a2bus_tftp_bump_heap_valid = 1;
         a2bus_tftp_bump_malloc = 1;
+        a2bus_tftp_timer_armed = 0;
         tapif_set_tftp_data_apply(a2bus_tftp_data_apply);
         fprintf(stderr,
                 "[A2Bus] TFTP bump-malloc enabled for RunTFTP "
@@ -2461,7 +2496,8 @@ int bramble_ext_guest_hook(void)
     /* Keep TFTP host-ACK moving even if guest is busy in cyw43 SPI/KSO. */
     if (a2bus_tftp_bump_malloc) {
         static unsigned tftp_svc;
-        if ((++tftp_svc & 0x3FFu) == 0u && cyw43.tap_fd >= 0)
+        a2bus_tftp_advance_guest_timer();
+        if ((++tftp_svc & 0xFFu) == 0u && cyw43.tap_fd >= 0)
             tapif_service(cyw43.tap_fd);
     }
     /* WiFi stubs before veneer so DoTestWifi hits SRAM veneer path too. */
