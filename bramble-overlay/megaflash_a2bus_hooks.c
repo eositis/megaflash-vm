@@ -936,6 +936,9 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
         return 1;
     if (c0pc >= 0x1001f268u && c0pc < 0x1001f2c0u) /* operator new */
         return 1;
+    /* Legitimate IPC wait — never treat as the CheckPicoW==0 discard loop. */
+    if (c0pc >= 0x1001162cu && c0pc < 0x10011674u) /* multicore_fifo_pop_timeout_us */
+        return 1;
     return 0;
 }
 
@@ -966,20 +969,37 @@ static void a2bus_ensure_core0_network_loop(void)
     if (c0pc >= 0x1001a000u && c0pc < 0x10022000u) /* cyw43 driver */
         return;
 
-    /* core0Loop takes fifo-discard when CheckPicoW cached 0 — always rescue.
-     * Early boot used to burn the force budget inside adc_init mid-CheckPicoW. */
+    /* Only the CheckPicoW==0 discard path uses fifo_pop_blocking forever.
+     * fifo_pop_timeout_us is normal IPC — forcing it → core0Loop spam-corrupts
+     * SP and prints GetNTP err=<stack junk>. */
     {
-        int fifo_stuck = (c0pc == 0x10011614u || c0pc == 0x20004408u ||
-                          (c0pc >= 0x10011614u && c0pc < 0x10011650u));
-        if (forced >= 8 && !fifo_stuck)
-            return;
-        fprintf(stderr, "[A2Bus] force core0 → core0Loop (was PC=0x%08X)%s\n",
-                c0pc, fifo_stuck ? " [fifo-stuck]" : "");
-        fflush(stderr);
-        if (!fifo_stuck)
+        int fifo_discard =
+            (c0pc == 0x10011614u || c0pc == 0x20004408u ||
+             (c0pc >= 0x10011614u && c0pc < 0x1001162cu));
+        static int fifo_rescues;
+
+        if (fifo_discard) {
+            /* Already know PicoW — should not be in discard; seed & leave once. */
+            if (mem_read8(USB_GUEST_PICOW_RESULT_BSS) != 0u && fifo_rescues >= 1)
+                return;
+            if (fifo_rescues >= 3)
+                return;
+            fprintf(stderr,
+                    "[A2Bus] force core0 → core0Loop (was PC=0x%08X) [fifo-discard]\n",
+                    c0pc);
+            fflush(stderr);
+            fifo_rescues++;
+            a2bus_force_picow_true();
+        } else {
+            if (forced >= 8)
+                return;
+            fprintf(stderr, "[A2Bus] force core0 → core0Loop (was PC=0x%08X)\n",
+                    c0pc);
+            fflush(stderr);
             forced++;
+            a2bus_force_picow_true();
+        }
     }
-    a2bus_force_picow_true();
     cores[CORE0].is_wfi = 0;
     cores[CORE0].is_halted = 0;
     if (cores[CORE0].r[13] < 0x20070000u || cores[CORE0].r[13] > 0x20082000u)
@@ -1166,7 +1186,7 @@ static int a2bus_wifi_hooks(void) {
      * Boot NTP already succeeded — skip further GetNetworkTime.
      */
     if (pc == USB_GUEST_GET_NETWORK_TIME || pc == 0x200044b0u) {
-        if (mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
+        if (mem_read8(USB_GUEST_RTC_RUNNING_BSS) || a2bus_rtc_valid) {
             static int skip_once;
             if (!skip_once++) {
                 fprintf(stderr,
@@ -1186,7 +1206,9 @@ static int a2bus_wifi_hooks(void) {
     /* GetNetworkTime keeps NETERR_NONE in r6 across InitRTC; aon_timer_start
      * clobbers r6 under Thumb emu so core0Loop sees a pointer-sized "error".
      * Success path branches to InitRTC then back to 0x100085c8 (mov r0,r6). */
-    if (pc == USB_GUEST_GET_NETWORK_TIME_RET && a2bus_ntp_init_rtc_ok) {
+    if (pc == USB_GUEST_GET_NETWORK_TIME_RET &&
+        (a2bus_ntp_init_rtc_ok || a2bus_rtc_valid ||
+         mem_read8(USB_GUEST_RTC_RUNNING_BSS))) {
         a2bus_ntp_init_rtc_ok = 0;
         cpu.r[6] = USB_GUEST_NETERR_NONE;
         cpu.r[0] = USB_GUEST_NETERR_NONE;
@@ -1200,10 +1222,18 @@ static int a2bus_wifi_hooks(void) {
         return 0;
     }
 
-    /* core0Loop: `cmp r4,#11` AFTER printf. Host printf clobbers r4 (callee-
-     * saved); force here so the 24h path is taken, not the 5‑minute retry. */
+    /* core0Loop: mov r4,r0 then printf then cmp r4,#11. Host printf clobbers
+     * r4; also repair at the mov so GetNTP err= never prints stack junk. */
+    if (pc == 0x20000198u &&
+        (a2bus_ntp_force_core0_ok || a2bus_rtc_valid ||
+         mem_read8(USB_GUEST_RTC_RUNNING_BSS))) {
+        cpu.r[0] = USB_GUEST_NETERR_NONE;
+        cpu.r[4] = USB_GUEST_NETERR_NONE;
+        return 0;
+    }
     if (pc == 0x200001a4u &&
-        (a2bus_ntp_force_core0_ok || mem_read8(USB_GUEST_RTC_RUNNING_BSS))) {
+        (a2bus_ntp_force_core0_ok || a2bus_rtc_valid ||
+         mem_read8(USB_GUEST_RTC_RUNNING_BSS))) {
         a2bus_ntp_force_core0_ok = 0;
         cpu.r[4] = USB_GUEST_NETERR_NONE;
         static int once;
