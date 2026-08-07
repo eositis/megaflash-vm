@@ -152,7 +152,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 
 **TFTP:** Needs live core0 (avoid TestWifi abort). Transfer uses guest lwIP → TAP UDP NAT.
 
-**TFTP stalls at Transferring / Blocks:1 after ACK:** Under emu, TAP flooded the guest with DATA1 retransmits + server `Timeout` before `PumpNetworkIteration` could ACK; late ACK got `Unknown transfer ID` and no block 2. TAP now paces TFTP RX (one DATA/OACK until ACK), drains stale ERROR/retransmits after ACK, and reuses the :69 NAT socket when the server replies from an ephemeral TID.
+**TFTP stalls at Transferring / Blocks:1 after ACK:** Under emu, TAP flooded the guest with DATA1 retransmits + server `Timeout` before `PumpNetworkIteration` could ACK; late ACK got `Unknown transfer ID` and no block 2. Even pacing one DATA was not enough — guest ACK still arrived after tftpd closed. TAP now **host-ACKs** the server immediately, buffers blocks, paces delivery to the guest, and suppresses forwarding guest ACKs (already ACKed on the wire).
 
 **Post-TestWifi HardFault (`PC=0x546E7552` / `"RunT…"`) then TFTP dead:** `long_cmd` used to end at DoTestWifi cleanup start (`0x10001d2a`) while CMD BUSY was still set; the next STATUS poll unstuck BusLoop mid-`strcpy`/`DoTFTPStatus` and corrupted PC. End long_cmd on the DoTestWifi `pop` (`0x10001d46`); arm long_cmd for `DoTFTPStatus` (veneer + flash); skip unstick while core1 is in strcmp/strcpy/TFTPFormat*/`timer_time_us_64`.
 
@@ -170,7 +170,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 6. **TFTP REQUEST then Idle / retransmit once, `assert server_port != 0`** — host-persisted `flash/megaflash-user-config.bin` omitted `InitAdvancedSettings`, so `tftp_serverport=0`. `SendPacket` asserts; a2bus `__assert_func` returns into a literal pool → transfer dies. Repair TFTP defaults on config load/persist (port 69 / timeout 2000 / maxatt 6); also patch `server_port` at `SendPacket` entry if still 0.
 7. **TFTP `Error: code 0` with 41-byte RRQ** — config `tftp_enable1kblock=1` adds `blksize`/`tsize` options; many LAN tftpd's reject with ERROR 0. Under a2bus, force `GetTFTPEnable1kBlockSize→0` (plain 20-byte octet RRQ). TAP logs TFTP TX/RX hex for confirmation.
 8. **TFTP DATA then server `Timeout` / no ACK** — `CUDPTask::NotifyUdpReceived` is a one-slot buffer; under emu TAP delivers DATA + retransmits + ERROR before `PumpNetworkIteration`, so ERROR overwrites DATA and no ACK is sent. a2bus keeps the pending RX and drops late packets.
-9. **TFTP Transferring / Blocks:1 then stall (`Unknown transfer ID`)** — even with keep-first RX, flooding CYW43 with DATA1 retransmits delays the ACK past server timeout. TAP paces one DATA until ACK, then drains stale Timeout/retransmits; also reuses the RRQ socket for ephemeral TID so ACK source port matches.
+9. **TFTP Transferring / Blocks:1 then stall (`Unknown transfer ID`)** — guest ACK latency exceeds tftpd timeout under Thumb emu. TAP **host-ACKs** DATA/OACK immediately, queues blocks (~512), delivers one at a time to the guest, and does not forward guest ACKs on the wire.
 
 DNS/NTP TAP UDP NAT already proves host sockets work; once RRQ is sent, `192.168.0.10:69` uses the same NAT path (guest is on `192.168.4.0/24`, so LAN TFTP is routed via the fake gw then NAT’d).
 
