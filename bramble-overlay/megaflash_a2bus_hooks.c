@@ -113,6 +113,10 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_FORMAT_IP_ADDR      0x10001cf8u /* FormatIPAddr */
 #define USB_GUEST_DO_TESTWIFI_AFTER_FMT 0x10001e1eu /* after FormatIPAddr x4 → exit */
 #define USB_GUEST_DO_TFTP_RUN         0x100025ccu /* DoTFTPRun */
+#define USB_GUEST_EXECUTE_TFTP        0x100084c0u /* ExecuteTFTP(taskid) */
+#define USB_GUEST_TFTP_TASKID_BSS     0x200580b8u /* tftpCurrentTaskID */
+#define USB_GUEST_CORE0_LOOP_RAM      0x20000140u /* core0Loop in Pico RAM */
+#define USB_GUEST_MAIN_CBZ_APPLE      0x100003ceu /* cbz r4 after InitPicoLed */
 #define USB_GUEST_TFTP_STATE          0x20005370u /* tftp_state */
 #define USB_GUEST_DATABUFFER_SIZE     512u
 
@@ -742,15 +746,111 @@ static int a2bus_malloc_hooks(uint32_t pc) {
 
 /* Launch BusLoop after CYW43 bring-up so core1 PIO is not HardFaulted by
  * concurrent gSPI/DMA on core0 (PC→0x1FFF8F6C during clmload). */
+static int a2bus_busloop_launched;
+
+/*
+ * main saves appleConnected in r4 then calls InitPicoLed/cyw43 (long). Under
+ * Thumb emu that call often clobbers r4 → cbz takes the USB-wait path →
+ * stdio_usb_connected/UserTerminal can park core0 forever, so GetNetworkTime
+ * never runs (no NTP/clock) and DoTFTPRun FIFO wait never completes.
+ */
+static int a2bus_core0_in_network_work(uint32_t c0pc)
+{
+    if (c0pc >= USB_GUEST_CORE0_LOOP_RAM && c0pc < 0x20000200u)
+        return 1;
+    if (c0pc >= 0x1000859cu && c0pc < 0x10008700u) /* GetNetworkTime / TestWifi */
+        return 1;
+    if (c0pc >= USB_GUEST_EXECUTE_TFTP && c0pc < 0x10008600u)
+        return 1;
+    if (c0pc >= 0x10000f98u && c0pc < 0x10001700u) /* RunTFTP / RunNTP */
+        return 1;
+    if (c0pc >= 0x10008bacu && c0pc < 0x1000a800u) /* ConnectWifi / CTFTP* */
+        return 1;
+    if (c0pc >= 0x10018000u && c0pc < 0x1001c000u) /* lwIP / cyw43_arch */
+        return 1;
+    return 0;
+}
+
+static void a2bus_ensure_core0_network_loop(void)
+{
+    uint32_t c0pc;
+    static int forced;
+
+    if (!a2bus_busloop_launched || !a2bus_bridge_active())
+        return;
+
+    c0pc = cores[CORE0].r[15] & ~1u;
+    if (a2bus_core0_in_network_work(c0pc))
+        return;
+    /* Still finishing main / InitPicoLed / cyw43_arch_init — do not preempt. */
+    if (c0pc >= 0x100002dcu && c0pc <= 0x100003ccu)
+        return;
+    if (c0pc >= 0x10004e08u && c0pc <= 0x10004f60u)
+        return;
+    if (c0pc >= 0x1000e9c0u && c0pc < 0x10010000u)
+        return;
+    if (c0pc >= 0x1001a000u && c0pc < 0x10022000u) /* cyw43 driver */
+        return;
+
+    if (forced >= 4)
+        return;
+    fprintf(stderr, "[A2Bus] force core0 → core0Loop (was PC=0x%08X)\n", c0pc);
+    fflush(stderr);
+    forced++;
+    cores[CORE0].is_wfi = 0;
+    cores[CORE0].is_halted = 0;
+    if (cores[CORE0].r[13] < 0x20070000u || cores[CORE0].r[13] > 0x20082000u)
+        cores[CORE0].r[13] = 0x20082000u;
+    cores[CORE0].r[15] = USB_GUEST_CORE0_LOOP_RAM | 1u;
+    cores[CORE0].xpsr = 0x01000000u;
+}
+
+/* DoTFTPRun busy-waits for tftp_state.taskid == tftpCurrentTaskID after FIFO
+ * push. If core0 never runs ExecuteTFTP, BUSY sticks forever. */
+static void a2bus_kick_core0_execute_tftp(void)
+{
+    uint32_t tid;
+    uint32_t c0pc;
+    static uint32_t kicked_tid;
+
+    tid = mem_read32(USB_GUEST_TFTP_TASKID_BSS);
+    if (tid == 0u)
+        return;
+    if (mem_read32(USB_GUEST_TFTP_STATE + 8u) == tid)
+        return; /* already started */
+    c0pc = cores[CORE0].r[15] & ~1u;
+    if (c0pc >= USB_GUEST_EXECUTE_TFTP && c0pc < 0x10008600u)
+        return;
+    if (c0pc >= USB_GUEST_RUNTFTP && c0pc < 0x10001200u)
+        return;
+    if (kicked_tid == tid)
+        return;
+    kicked_tid = tid;
+
+    fprintf(stderr,
+            "[A2Bus] kick core0 ExecuteTFTP taskid=%u (was PC=0x%08X)\n",
+            (unsigned)tid, c0pc);
+    fflush(stderr);
+    a2bus_ensure_core0_network_loop();
+    cores[CORE0].is_wfi = 0;
+    cores[CORE0].is_halted = 0;
+    if (cores[CORE0].r[13] < 0x20070000u || cores[CORE0].r[13] > 0x20082000u)
+        cores[CORE0].r[13] = 0x20082000u;
+    cores[CORE0].r[0] = tid;
+    /* Return into core0Loop service poll after ExecuteTFTP. */
+    cores[CORE0].r[14] = 0x20000177u;
+    cores[CORE0].r[15] = USB_GUEST_EXECUTE_TFTP | 1u;
+    cores[CORE0].xpsr = 0x01000000u;
+}
+
 static void a2bus_ensure_busloop_core1(void) {
-    static int launched;
     static int saw_cyw43_arch_init;
-    if (launched || !a2bus_bridge_active()) {
+    if (a2bus_busloop_launched || !a2bus_bridge_active()) {
         return;
     }
     uint32_t c1pc = cores[CORE1].r[15] & ~1u;
     if (!cores[CORE1].is_halted && c1pc >= 0x20000120u && c1pc < 0x20010000u) {
-        launched = 1;
+        a2bus_busloop_launched = 1;
         return;
     }
 
@@ -777,7 +877,7 @@ static void a2bus_ensure_busloop_core1(void) {
         return;
     }
 
-    launched = 1;
+    a2bus_busloop_launched = 1;
     /* cyw43_arch_init DMA/buffers can clobber BusLoop in Pico RAM. Reload only
      * that code range so SDK/runtime .data (alarm pool, workers) stays intact. */
     if (mem_guest_memcpy(USB_GUEST_DATA_START, USB_GUEST_DATA_LMA,
@@ -802,7 +902,30 @@ static int a2bus_wifi_hooks(void) {
     }
     a2bus_ensure_malloc_mutex();
     a2bus_ensure_busloop_core1();
+    a2bus_ensure_core0_network_loop();
     uint32_t pc = cpu.r[15] & ~1u;
+
+    /* InitPicoLed/cyw43 clobbers callee-saved r4 under emu; force appleConnected
+     * so main enters core0Loop instead of the USB-wait / UserTerminal path. */
+    if (pc == USB_GUEST_MAIN_CBZ_APPLE) {
+        cpu.r[4] = 1u;
+        return 0;
+    }
+
+    /* No USB host under a2bus — never enter UserTerminal. */
+    if (pc == USB_GUEST_STDIO_USB_CONNECTED) {
+        cpu.r[0] = 0u;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == USB_GUEST_USER_TERMINAL) {
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == USB_GUEST_MAIN_USB_LOOP) {
+        cpu.r[15] = 0x10000418u | 1u; /* PicoW_ServiceCore0IpcAndNetwork */
+        return 1;
+    }
 
     /* Track firmware InitRTC so host DoGetTimeString matches guest calendar.
      * AAPCS: time_t is 64-bit in r0:r1, timezone offset in r2. */
@@ -945,6 +1068,11 @@ static int a2bus_wifi_hooks(void) {
     if (pc == USB_GUEST_DO_TFTP_RUN || pc == 0x200045e0u) {
         if (!a2bus_long_cmd_active())
             a2bus_long_cmd_begin("DoTFTPRun");
+        return 0;
+    }
+    /* Busy-wait for tftp_state.taskid — kick core0 ExecuteTFTP if IPC stalled. */
+    if (a2bus_long_cmd_active() && pc >= 0x100026c8u && pc <= 0x100026f4u) {
+        a2bus_kick_core0_execute_tftp();
         return 0;
     }
     /* SaveTFTPLastServer (flag&1 from CP StartTFTP): newlib strcmp hung forever

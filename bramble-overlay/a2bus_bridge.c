@@ -473,7 +473,7 @@ static void a2bus_unstick_busloop(const char *why)
             fflush(stderr);
         }
         skip_logged++;
-        /* Extra pump so core0 can finish TestWifi while BUSY stays set. */
+        /* Extra pump so core0 can finish TestWifi/TFTP while BUSY stays set. */
         if (br.pump)
             br.pump(br.pump_steps);
         else {
