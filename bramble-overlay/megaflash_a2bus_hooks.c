@@ -12,6 +12,7 @@
 #include "cyw43.h"
 #include "emulator.h"
 #include "corepool.h"
+#include "tapif.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -162,6 +163,32 @@ static void usb_guest_a2bus_tx_byte(uint8_t ch) {
 #define USB_GUEST_OPERATOR_NEW        0x1001f268u /* _Znwj operator new(unsigned) */
 #define USB_GUEST_OPERATOR_NEW_ARR    0x1001f2a4u /* _Znaj operator new[] → _Znwj */
 #define USB_GUEST_CTFTPRX_CTOR        0x100099b8u /* CTFTPRXTask::CTFTPRXTask */
+#define USB_GUEST_CUDP_RUNNING_OBJ    0x2000b440u /* CUDPTask::runningObject */
+
+/*
+ * CTFTPRXTask / CUDPTask field offsets (pico2_debug V1.2.3-eo).
+ * Host-apply TFTP DATA here to skip CYW43 gSPI (~3 blk/s → host flash rate).
+ */
+#define A2BUS_CUDP_TIMER_LO           0x40u
+#define A2BUS_CUDP_TIMER_HI           0x44u
+#define A2BUS_CUDP_COMPLETED          0x4cu
+#define A2BUS_CTFTP_UNITNUM           0x70u
+#define A2BUS_CTFTP_ATTEMPT           0x90u
+#define A2BUS_CTFTP_SERVER_PORT       0x94u
+#define A2BUS_CTFTPRX_EXPECTED_BLOCK  0xa2u
+#define A2BUS_CTFTPRX_HAS_COMPLETED   0xa4u
+#define A2BUS_CTFTPRX_BLOCK_RECEIVED  0xa8u
+#define A2BUS_CTFTPRX_BLOCK_CAPACITY  0xacu
+#define A2BUS_CTFTPRX_TFTP_BLOCKSIZE  0xb0u
+#define A2BUS_CTFTPRX_SERVER_TID_OK   0xb4u
+
+#define A2BUS_TFTPSTATUS_TRANSFER     4u
+#define A2BUS_TFTPSTATUS_COMPLETING   5u
+#define A2BUS_TFTPSTATUS_COMPLETED    6u
+#define A2BUS_TFTPERROR_NOERR         ((uint32_t)-1)
+#define A2BUS_TFTPERROR_ODDSIZE       ((uint32_t)-5)
+#define A2BUS_TFTPERROR_OVERSIZE      ((uint32_t)-6)
+#define A2BUS_TFTPERROR_RWFAILED      ((uint32_t)-11)
 #define USB_GUEST_HEAP_END_PTR        0x2000d1e4u /* _sbrk heap_end */
 #define USB_GUEST_HEAP_BASE           0x20061628u /* __end__ */
 #define USB_GUEST_HEAP_LIMIT          0x20080000u /* __HeapLimit / check_alloc */
@@ -671,12 +698,171 @@ static void a2bus_force_picow_true(void) {
     mem_write8(USB_GUEST_PICOW_RESULT_BSS, 1u);
 }
 
+static void a2bus_tftp_cancel_guest_timer(uint32_t self) {
+    /* TIMEOUT_NEVER == at_the_end_of_time (uint64 max). */
+    mem_write32(self + A2BUS_CUDP_TIMER_LO, 0xffffffffu);
+    mem_write32(self + A2BUS_CUDP_TIMER_HI, 0x7fffffffu);
+}
+
+static void a2bus_tftp_finish_guest(uint32_t self, uint32_t error_code,
+                                    uint8_t status) {
+    uint32_t st = USB_GUEST_TFTP_STATE;
+    a2bus_tftp_cancel_guest_timer(self);
+    mem_write8(self + A2BUS_CTFTPRX_HAS_COMPLETED, 1u);
+    mem_write8(self + A2BUS_CUDP_COMPLETED, 1u);
+    mem_write32(st + 32u, error_code);
+    mem_write8(st + 36u, status);
+}
+
+/*
+ * TAP TFTP proxy calls this instead of delivering DATA through CYW43.
+ * Writes SPI backing + updates tftp_state / CTFTPRXTask so the CP UI moves
+ * and RunTFTP can Complete without ~3 blk/s gSPI.
+ */
+static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
+                                 uint16_t server_port) {
+    uint32_t self;
+    uint16_t op, blk, expected;
+    uint32_t data_size;
+    uint32_t unit, block_recv, capacity, bsz;
+    uint32_t st = USB_GUEST_TFTP_STATE;
+    static unsigned applied;
+
+    if (!a2bus_bridge_active() || !payload || len < 4)
+        return 0;
+    op = ((uint16_t)payload[0] << 8) | payload[1];
+    if (op != 3u) /* DATA only; OACK still via guest if ever used */
+        return 0;
+
+    self = mem_read32(USB_GUEST_CUDP_RUNNING_OBJ);
+    if (self < 0x20000000u || self >= 0x20080000u)
+        return 0;
+
+    blk = ((uint16_t)payload[2] << 8) | payload[3];
+    data_size = (uint32_t)(len - 4);
+    unit = mem_read32(self + A2BUS_CTFTP_UNITNUM);
+    block_recv = mem_read32(self + A2BUS_CTFTPRX_BLOCK_RECEIVED);
+    capacity = mem_read32(self + A2BUS_CTFTPRX_BLOCK_CAPACITY);
+    bsz = mem_read32(self + A2BUS_CTFTPRX_TFTP_BLOCKSIZE);
+    if (bsz != 512u && bsz != 1024u)
+        bsz = 512u;
+
+    expected = mem_read16(self + A2BUS_CTFTPRX_EXPECTED_BLOCK);
+    if (expected == 0u)
+        expected = 1u;
+    if (blk != expected) {
+        /* Retransmit of prior block — already host-ACKed; ignore. */
+        if (blk + 1u == expected)
+            return 1;
+        return 1;
+    }
+
+    if (block_recv == 0u) {
+        mem_write8(st + 36u, A2BUS_TFTPSTATUS_TRANSFER);
+        mem_write16(self + A2BUS_CTFTP_SERVER_PORT, server_port);
+        mem_write8(self + A2BUS_CTFTPRX_SERVER_TID_OK, 1u);
+        if (applied == 0u) {
+            fprintf(stderr,
+                    "[A2Bus] TFTP host-apply: first DATA (unit=%u port=%u)\n",
+                    (unsigned)unit, (unsigned)server_port);
+            fflush(stderr);
+        }
+    }
+
+    /* Empty DATA = EOF after exact multiple of block size. */
+    if (data_size == 0u) {
+        mem_write32(st + 20u, block_recv);
+        a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_NOERR,
+                                A2BUS_TFTPSTATUS_COMPLETED);
+        fprintf(stderr,
+                "[A2Bus] TFTP host-apply COMPLETED blocks=%u (empty EOF)\n",
+                (unsigned)block_recv);
+        fflush(stderr);
+        return 1;
+    }
+
+    if (data_size < bsz) {
+        /* Odd trailing size — firmware marks ODDSIZE without writing. */
+        mem_write32(st + 20u, block_recv);
+        a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_ODDSIZE,
+                                A2BUS_TFTPSTATUS_COMPLETED);
+        fprintf(stderr,
+                "[A2Bus] TFTP host-apply ODDSIZE at block %u (%u bytes)\n",
+                (unsigned)block_recv, (unsigned)data_size);
+        fflush(stderr);
+        return 1;
+    }
+
+    if (data_size != bsz && !(bsz == 1024u && data_size == 512u))
+        return 1; /* discard weird sizes */
+
+    if (block_recv >= capacity) {
+        a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_OVERSIZE,
+                                A2BUS_TFTPSTATUS_COMPLETED);
+        return 1;
+    }
+
+    if (data_size >= 512u) {
+        if (!usb_guest_flash_write_image_block(unit, block_recv, payload + 4)) {
+            a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_RWFAILED,
+                                    A2BUS_TFTPSTATUS_COMPLETED);
+            return 1;
+        }
+        block_recv++;
+        mem_write32(self + A2BUS_CTFTPRX_BLOCK_RECEIVED, block_recv);
+        mem_write32(st + 20u, block_recv);
+    }
+    if (bsz == 1024u && data_size == 1024u) {
+        if (block_recv >= capacity) {
+            a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_OVERSIZE,
+                                    A2BUS_TFTPSTATUS_COMPLETED);
+            return 1;
+        }
+        if (!usb_guest_flash_write_image_block(unit, block_recv,
+                                               payload + 4 + 512)) {
+            a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_RWFAILED,
+                                    A2BUS_TFTPSTATUS_COMPLETED);
+            return 1;
+        }
+        block_recv++;
+        mem_write32(self + A2BUS_CTFTPRX_BLOCK_RECEIVED, block_recv);
+        mem_write32(st + 20u, block_recv);
+    }
+
+    mem_write16(self + A2BUS_CTFTPRX_EXPECTED_BLOCK, (uint16_t)(blk + 1u));
+    mem_write32(self + A2BUS_CTFTP_ATTEMPT, 1u);
+    a2bus_tftp_cancel_guest_timer(self);
+    mem_write8(st + 36u, A2BUS_TFTPSTATUS_TRANSFER);
+
+    applied++;
+    if (applied <= 8u || (applied % 256u) == 0u) {
+        fprintf(stderr,
+                "[A2Bus] TFTP host-apply block #%u (tftp=%u written=%u)\n",
+                applied, (unsigned)blk, (unsigned)block_recv);
+        fflush(stderr);
+    }
+
+    /* 1024-mode mid-EOF with exactly 512 payload bytes → last half-block. */
+    if (bsz == 1024u && data_size == 512u) {
+        a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_NOERR,
+                                A2BUS_TFTPSTATUS_COMPLETED);
+        fprintf(stderr,
+                "[A2Bus] TFTP host-apply COMPLETED blocks=%u (512 EOF)\n",
+                (unsigned)block_recv);
+        fflush(stderr);
+    }
+    return 1;
+}
+
 static void a2bus_tftp_bump_enable(void) {
     if (!a2bus_tftp_bump_malloc) {
         a2bus_tftp_bump_heap_saved = mem_read32(USB_GUEST_HEAP_END_PTR);
         a2bus_tftp_bump_heap_valid = 1;
         a2bus_tftp_bump_malloc = 1;
-        fprintf(stderr, "[A2Bus] TFTP bump-malloc enabled for RunTFTP\n");
+        tapif_set_tftp_data_apply(a2bus_tftp_data_apply);
+        fprintf(stderr,
+                "[A2Bus] TFTP bump-malloc enabled for RunTFTP "
+                "(host-apply fast path)\n");
         fflush(stderr);
     }
 }
@@ -685,6 +871,7 @@ static void a2bus_tftp_bump_disable(const char *why) {
     if (!a2bus_tftp_bump_malloc)
         return;
     a2bus_tftp_bump_malloc = 0;
+    tapif_set_tftp_data_apply(NULL);
     /* Bump advanced _sbrk heap_end while free was a no-op. Restoring the
      * pre-TFTP break lets post-TFTP RunNTP/pbuf_alloc use a clean heap. */
     if (a2bus_tftp_bump_heap_valid) {
