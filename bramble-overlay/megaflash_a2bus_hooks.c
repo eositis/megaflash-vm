@@ -934,6 +934,8 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
         return 1;
     if (c0pc >= 0x100070b4u && c0pc < 0x10007200u) /* U2_MonPollFlush */
         return 1;
+    if (c0pc >= 0x1000e2aau && c0pc < 0x1000e400u) /* __wrap_puts / printf */
+        return 1;
     if (c0pc >= 0x10018000u && c0pc < 0x1001c000u) /* lwIP / cyw43_arch */
         return 1;
     if (c0pc >= 0x1001f268u && c0pc < 0x1001f2c0u) /* operator new */
@@ -1450,6 +1452,31 @@ static int a2bus_wifi_hooks(void) {
 
     if (a2bus_malloc_hooks(pc)) {
         return 1;
+    }
+
+    /*
+     * CUDPTask::NotifyUdpReceived uses a one-slot rxbuffer. Under a2bus, TAP
+     * can deliver DATA + retransmits + server ERROR before PumpNetworkIteration
+     * runs → last packet wins (ERROR Timeout) and no ACK is ever sent. If a
+     * packet is already pending, drop the late one so the first DATA is ACKed.
+     */
+    if (pc == 0x10009050u) { /* CUDPTask::NotifyUdpReceived */
+        uint32_t self = cpu.r[0];
+        if (self >= 0x20000000u && self < 0x20080000u &&
+            mem_read8(self + 0x2cu) != 0u) {
+            static int dropped;
+            if (dropped < 12) {
+                dropped++;
+                fprintf(stderr,
+                        "[A2Bus] NotifyUdpReceived: keep pending RX "
+                        "(drop late packet #%d)\n",
+                        dropped);
+                fflush(stderr);
+            }
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+        return 0;
     }
 
     /* Gate bump-malloc to RunTFTP only (see a2bus_tftp_bump_malloc). */
