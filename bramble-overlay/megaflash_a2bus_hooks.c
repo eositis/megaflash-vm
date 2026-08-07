@@ -876,8 +876,10 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
 {
     if (c0pc >= USB_GUEST_CORE0_LOOP_RAM && c0pc < 0x20000200u)
         return 1;
-    /* core0Loop calls SRAM veneers (CheckPicoW, GetNetworkTime, …) */
+    /* core0Loop SRAM veneers (CheckPicoW, GetNetworkTime, …) and flash veneer */
     if (c0pc >= 0x20004400u && c0pc < 0x20004800u)
+        return 1;
+    if (c0pc == 0x10034cf8u) /* __core0Loop_veneer */
         return 1;
     if (c0pc >= 0x1000859cu && c0pc < 0x10008700u) /* GetNetworkTime / TestWifi */
         return 1;
@@ -886,6 +888,8 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
     if (c0pc >= 0x10000f98u && c0pc < 0x10001700u) /* RunTFTP / RunNTP / hashtable */
         return 1;
     if (c0pc >= 0x10008bacu && c0pc < 0x1000a800u) /* ConnectWifi / CTFTP* */
+        return 1;
+    if (c0pc >= 0x1000a800u && c0pc < 0x1000b000u) /* gpio helpers used by cyw43/LED */
         return 1;
     if (c0pc >= 0x10018000u && c0pc < 0x1001c000u) /* lwIP / cyw43_arch */
         return 1;
@@ -1391,6 +1395,23 @@ static int a2bus_wifi_hooks(void) {
         static int once;
         if (!once++) {
             fprintf(stderr, "[A2Bus] CTFTPRXTask::StartTransfer (RRQ → :69)\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
+    /* Persisted config often had tftp_serverport=0 → assert in SendPacket.
+     * Repair this->server_port from tftpServerPort or default 69 before send. */
+    if (pc == 0x10009470u || pc == 0x1000a0fcu) { /* CTFTPTask::SendPacket overloads */
+        uint32_t self = cpu.r[0];
+        uint16_t sport = mem_read16(self + 0x94u);
+        if (sport == 0u) {
+            uint16_t configured = mem_read16(self + 0x88u);
+            if (configured == 0u)
+                configured = 69u;
+            mem_write16(self + 0x94u, configured);
+            fprintf(stderr,
+                    "[A2Bus] SendPacket: server_port was 0 — set to %u\n",
+                    (unsigned)configured);
             fflush(stderr);
         }
         return 0;
