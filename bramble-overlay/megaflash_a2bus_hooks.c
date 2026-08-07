@@ -2156,6 +2156,12 @@ static int a2bus_spi_flash_hooks(void) {
         usb_guest_stub_write_block();
         return 1;
     }
+    /* TFTP/XMODEM image path — native SPI erase asserts under a2bus (InitSpi
+     * skipped → bad GetBlockLoc). Same host backing as USB console. */
+    if (pc == USB_GUEST_WRITE_BLOCK_IMAGE) {
+        usb_guest_stub_write_block_for_image_transfer();
+        return 1;
+    }
     if (pc == USB_GUEST_COPY_MEMORY_ALIGNED ||
         pc == USB_GUEST_COPY_MEMORY_ALIGNED_V) {
         /* CMD_LOAD_CPANEL copies cpanel pages via DMA; stub host memcpy. */
