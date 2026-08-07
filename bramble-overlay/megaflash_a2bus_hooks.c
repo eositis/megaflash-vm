@@ -918,6 +918,9 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
         return 1;
     if (c0pc >= 0x10004e08u && c0pc < 0x10004ec0u) /* CheckPicoW body */
         return 1;
+    /* Config getters called from GetNetworkTime / CP — do not yank core0 out. */
+    if (c0pc >= 0x10005400u && c0pc < 0x10005680u) /* GetNTPClientEnabled / GetSSID / … */
+        return 1;
     if (c0pc >= 0x1000859cu && c0pc < 0x10008700u) /* GetNetworkTime / TestWifi */
         return 1;
     if (c0pc >= USB_GUEST_EXECUTE_TFTP && c0pc < 0x10008600u)
