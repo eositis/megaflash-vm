@@ -667,6 +667,14 @@ static uint32_t a2bus_host_bump_malloc(uint32_t size) {
     if (size == 0u) {
         size = 1u;
     }
+    /* Hashtable rehash under Thumb emu can compute absurd bucket counts
+     * (seen: operator new(~1GB) → OOM → TFTP Idle). Cap to remaining heap. */
+    if (size > 0x10000u) {
+        fprintf(stderr, "[A2Bus] host malloc reject oversized size=%u\n",
+                (unsigned)size);
+        fflush(stderr);
+        return 0u;
+    }
     size = (size + 7u) & ~7u;
     end = mem_read32(USB_GUEST_HEAP_END_PTR);
     if (end < USB_GUEST_HEAP_BASE || end > USB_GUEST_HEAP_LIMIT) {
@@ -691,6 +699,107 @@ static int a2bus_malloc_hooks(uint32_t pc) {
         return 0;
     }
     /*
+     * NetworkPump udp/tcp session hashtable rehash: SoftFloat / UDIV under emu
+     * can yield huge bucket counts → operator new(~1GB) → OOM → TFTP Idle.
+     * Clamp at rehash entry (so modulo uses the same n) and host-complete
+     * allocate_buckets / next_bkt.
+     */
+    if (pc == 0x100014a8u || pc == 0x100016a2u) { /* _M_rehash udp/tcp */
+        if (cpu.r[1] > 64u) {
+            fprintf(stderr,
+                    "[A2Bus] hashtable _M_rehash n=%u clamped to 11\n",
+                    (unsigned)cpu.r[1]);
+            fflush(stderr);
+            cpu.r[1] = 11u;
+        }
+        return 0;
+    }
+    if (pc == 0x1001f5d4u) { /* _Prime_rehash_policy::_M_next_bkt */
+        uint32_t policy = cpu.r[0];
+        uint32_t n = cpu.r[1];
+        uint32_t out = 11u;
+        static const uint32_t primes[] = {
+            2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 37, 41, 47, 53, 59, 61, 67, 71, 79
+        };
+        unsigned i;
+        if (n <= 1u) {
+            out = 2u;
+        } else if (n <= 79u) {
+            out = n;
+            for (i = 0; i < sizeof(primes) / sizeof(primes[0]); i++) {
+                if (primes[i] >= n) {
+                    out = primes[i];
+                    break;
+                }
+            }
+        }
+        /* SoftFloat path also caches _M_next_resize at policy+4. */
+        if (policy >= 0x20000000u && policy < 0x20080000u) {
+            mem_write32(policy + 4u, out);
+        }
+        cpu.r[0] = out;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    /*
+     * _M_need_rehash uses SoftFloat (ui2d/ddiv/dmul/floor). Under emu that
+     * path yields absurd next-bucket sizes before allocate_buckets. Host-
+     * complete: rehash only when empty/sentinel or clearly over capacity.
+     */
+    if (pc == 0x1001f688u) {
+        uint32_t out = cpu.r[0];
+        uint32_t policy = cpu.r[1];
+        uint32_t n_bkt = cpu.r[2];
+        uint32_t n_elt = cpu.r[3];
+        /* Hook runs at entry (before stmdb/sub sp,#8); 5th arg is at [sp]. */
+        uint32_t n_ins = mem_read32(cpu.r[13]);
+        uint32_t total = n_elt + n_ins;
+        uint32_t do_rehash = 0u;
+        uint32_t new_n = 0u;
+        if (n_bkt <= 1u || total > n_bkt) {
+            do_rehash = 1u;
+            new_n = 11u;
+            if (total > 11u && total <= 64u) {
+                static const uint32_t primes[] = {
+                    13, 17, 19, 23, 29, 37, 41, 47, 53, 59, 61
+                };
+                unsigned i;
+                new_n = total;
+                for (i = 0; i < sizeof(primes) / sizeof(primes[0]); i++) {
+                    if (primes[i] >= total) {
+                        new_n = primes[i];
+                        break;
+                    }
+                }
+            }
+            if (policy >= 0x20000000u && policy < 0x20080000u) {
+                mem_write32(policy + 4u, new_n);
+            }
+        }
+        mem_write32(out, do_rehash);
+        mem_write32(out + 4u, new_n);
+        cpu.r[0] = out;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    if (pc == 0x1000148au || pc == 0x10001684u) { /* udp / tcp _M_allocate_buckets */
+        uint32_t n = cpu.r[1];
+        uint32_t p;
+        if (n < 1u)
+            n = 1u;
+        if (n > 64u) {
+            fprintf(stderr,
+                    "[A2Bus] hashtable buckets n=%u clamped to 11\n",
+                    (unsigned)n);
+            fflush(stderr);
+            n = 11u;
+        }
+        p = a2bus_host_bump_malloc(n * 4u);
+        cpu.r[0] = p;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    /*
      * Host-complete operator new while bump is active. dual_core_step used to
      * clear Thumb IT on every bind, so `_Znwj`'s `it cc; movcc r0,#1` always
      * ran and forced size=1 before wrap_malloc. Even with IT preserved, take
@@ -710,9 +819,18 @@ static int a2bus_malloc_hooks(uint32_t pc) {
                 size = 200u; /* CTFTPTXTask */
             }
         }
+        /* Bucket alloc: size==n*4 with corrupt n — refuse rather than OOM-zero. */
+        if (size > 0x10000u && (lr == 0x1000147au || lr == 0x10001498u)) {
+            fprintf(stderr,
+                    "[A2Bus] TFTP operator new reject size=%u lr=0x%08X "
+                    "(hashtable); using 44 bytes (11 buckets)\n",
+                    (unsigned)size, lr);
+            fflush(stderr);
+            size = 44u;
+        }
         uint32_t p = a2bus_host_bump_malloc(size);
         static int logged;
-        if (logged < 12) {
+        if (logged < 16) {
             fprintf(stderr, "[A2Bus] TFTP operator new(%u) lr=0x%08X → 0x%08X\n",
                     (unsigned)size, lr, p);
             fflush(stderr);
@@ -726,7 +844,7 @@ static int a2bus_malloc_hooks(uint32_t pc) {
         uint32_t size = cpu.r[0];
         uint32_t p = a2bus_host_bump_malloc(size);
         static int logged;
-        if (logged < 12) {
+        if (logged < 16) {
             fprintf(stderr, "[A2Bus] TFTP bump malloc(%u) → 0x%08X\n",
                     (unsigned)size, p);
             fflush(stderr);
@@ -758,15 +876,20 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
 {
     if (c0pc >= USB_GUEST_CORE0_LOOP_RAM && c0pc < 0x20000200u)
         return 1;
+    /* core0Loop calls SRAM veneers (CheckPicoW, GetNetworkTime, …) */
+    if (c0pc >= 0x20004400u && c0pc < 0x20004800u)
+        return 1;
     if (c0pc >= 0x1000859cu && c0pc < 0x10008700u) /* GetNetworkTime / TestWifi */
         return 1;
     if (c0pc >= USB_GUEST_EXECUTE_TFTP && c0pc < 0x10008600u)
         return 1;
-    if (c0pc >= 0x10000f98u && c0pc < 0x10001700u) /* RunTFTP / RunNTP */
+    if (c0pc >= 0x10000f98u && c0pc < 0x10001700u) /* RunTFTP / RunNTP / hashtable */
         return 1;
     if (c0pc >= 0x10008bacu && c0pc < 0x1000a800u) /* ConnectWifi / CTFTP* */
         return 1;
     if (c0pc >= 0x10018000u && c0pc < 0x1001c000u) /* lwIP / cyw43_arch */
+        return 1;
+    if (c0pc >= 0x1001f268u && c0pc < 0x1001f2c0u) /* operator new */
         return 1;
     return 0;
 }
@@ -775,15 +898,21 @@ static void a2bus_ensure_core0_network_loop(void)
 {
     uint32_t c0pc;
     static int forced;
+    int active;
 
     if (!a2bus_busloop_launched || !a2bus_bridge_active())
         return;
 
     c0pc = cores[CORE0].r[15] & ~1u;
+    active = get_active_core();
+    if (active == CORE0)
+        c0pc = cpu.r[15] & ~1u;
+
     if (a2bus_core0_in_network_work(c0pc))
         return;
-    /* Still finishing main / InitPicoLed / cyw43_arch_init — do not preempt. */
-    if (c0pc >= 0x100002dcu && c0pc <= 0x100003ccu)
+    /* Still finishing main / InitPicoLed / cyw43_arch_init — do not preempt.
+     * Include 0x100003CE (cbz r4 after LED); r4 is repaired separately. */
+    if (c0pc >= 0x100002dcu && c0pc <= 0x100003d0u)
         return;
     if (c0pc >= 0x10004e08u && c0pc <= 0x10004f60u)
         return;
@@ -803,6 +932,11 @@ static void a2bus_ensure_core0_network_loop(void)
         cores[CORE0].r[13] = 0x20082000u;
     cores[CORE0].r[15] = USB_GUEST_CORE0_LOOP_RAM | 1u;
     cores[CORE0].xpsr = 0x01000000u;
+    if (active == CORE0) {
+        cpu.r[15] = USB_GUEST_CORE0_LOOP_RAM | 1u;
+        if (cpu.r[13] < 0x20070000u || cpu.r[13] > 0x20082000u)
+            cpu.r[13] = 0x20082000u;
+    }
 }
 
 /* DoTFTPRun busy-waits for tftp_state.taskid == tftpCurrentTaskID after FIFO
@@ -841,6 +975,13 @@ static void a2bus_kick_core0_execute_tftp(void)
     cores[CORE0].r[14] = 0x20000177u;
     cores[CORE0].r[15] = USB_GUEST_EXECUTE_TFTP | 1u;
     cores[CORE0].xpsr = 0x01000000u;
+    if (get_active_core() == CORE0) {
+        cpu.r[0] = tid;
+        cpu.r[14] = 0x20000177u;
+        cpu.r[15] = USB_GUEST_EXECUTE_TFTP | 1u;
+        if (cpu.r[13] < 0x20070000u || cpu.r[13] > 0x20082000u)
+            cpu.r[13] = 0x20082000u;
+    }
 }
 
 static void a2bus_ensure_busloop_core1(void) {
@@ -924,6 +1065,12 @@ static int a2bus_wifi_hooks(void) {
     }
     if (pc == USB_GUEST_MAIN_USB_LOOP) {
         cpu.r[15] = 0x10000418u | 1u; /* PicoW_ServiceCore0IpcAndNetwork */
+        return 1;
+    }
+    /* Hit CheckPicoW in wifi hooks so core0Loop never takes the fifo-discard path. */
+    if (pc == USB_GUEST_CHECK_PICOW_FN) {
+        cpu.r[0] = 1u;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
 
