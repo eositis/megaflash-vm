@@ -145,6 +145,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 3. **`TestWifi` C++ EH abort** — second BeginRun/DNS/NTP throws; Bramble cannot unwind → `_exit`. When link is already UP and RTC is set (boot NTP proved connectivity), **complete `TestResult` from the live netif lease** (same fields `EvtStart` copies) and return — DoTestWifi then runs `FormatIPAddr`. Abort during long_cmd also recovers by filling `testResult` and resuming `core0Loop`.
 4. **`FormatIPAddr` junk** — host-complete FormatIPAddr; always rewrite dataBuffer from testResult/netif.
 5. **core0 WFI treated as abort** — `a2bus_busy_is_long_command` returned 0 on `cores[CORE0].is_wfi` *before* long_cmd / DoTFTPRun PC checks. TestWifi/TFTP sleep on core0 (cyw43 / FIFO WFE) while core1 holds BUSY → false BUSY timeout → unstick → IP "AG"/blank and DoTFTPRun killed. long_cmd and known PC ranges now win; only guest `_exit` forces unstick.
+6. **DoTestWifi IPC deadlock** — core1 FIFO-pushes and sleep-waits for core0 `TestWifi`; core0 is often still in boot `GetNetworkTime`/RunNTP (or not in `core0Loop`) so `testCompleted` never sets → BUSY forever (skip-unstick loops). **Host-complete `DoTestWifi`** under a2bus (fill TestResult + dataBuffer IPs, clear BUSY).
 
 **TFTP:** Needs live core0 (avoid TestWifi abort). Transfer uses guest lwIP → TAP UDP NAT.
 

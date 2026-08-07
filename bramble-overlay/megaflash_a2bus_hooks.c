@@ -462,6 +462,37 @@ static void a2bus_fill_testwifi_databuffer(char out[4][20])
     mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
 }
 
+/*
+ * DoTestWifi pushes FIFO to core0 and sleep-polls testCompleted. Under a2bus
+ * core0 is often still in boot GetNetworkTime/RunNTP (or not in core0Loop yet)
+ * and never services that IPC → CP locks with BUSY while we correctly refuse
+ * to unstick. Host-complete the CMD: fill TestResult + dataBuffer IPs, clear
+ * BUSY, return. Same lease fields EvtStart would copy (or fake-DHCP defaults).
+ */
+static void a2bus_host_complete_do_test_wifi(void)
+{
+    char ip[4][20];
+    uint8_t st;
+
+    a2bus_fill_test_result(USB_GUEST_TEST_RESULT);
+    a2bus_fill_testwifi_databuffer(ip);
+
+    mem_write8(USB_GUEST_PARAMETER_BUFFER, (uint8_t)USB_GUEST_NETERR_NONE);
+    mem_write32(USB_GUEST_PARAM_BUFFER_INDEX, 0);
+    mem_write32(USB_GUEST_DATA_BUFFER_INDEX, 0);
+    mem_write8(USB_GUEST_DATA_XFER_MODE, 0);
+    mem_write8(USB_GUEST_REGISTERS + 1u, (uint8_t)USB_GUEST_NETERR_NONE);
+    mem_write8(USB_GUEST_REGISTERS + 2u, mem_read8(USB_GUEST_DATA_BUFFER));
+    st = mem_read8(USB_GUEST_REGISTERS);
+    mem_write8(USB_GUEST_REGISTERS, (uint8_t)(st & (uint8_t)~0x5Fu));
+
+    fprintf(stderr,
+            "[A2Bus] DoTestWifi host-complete (link_up=%d): "
+            "ip='%s' mask='%s' gw='%s' dns='%s'\n",
+            a2bus_link_up_with_ip(), ip[0], ip[1], ip[2], ip[3]);
+    fflush(stderr);
+}
+
 static void a2bus_apply_init_rtc(time_t utc_epoch, int32_t offset_sec) {
     a2bus_rtc_base_local = utc_epoch + (time_t)offset_sec;
     a2bus_rtc_host_at_set = time(NULL);
@@ -555,7 +586,7 @@ static int a2bus_stub_cyw43(void) {
             fprintf(stderr, "[A2Bus] BRAMBLE_A2BUS_STUB_WIFI=1 — stub cyw43_arch_init\n");
         } else {
             fprintf(stderr,
-                    "[A2Bus] real CYW43 path (radio stub; native DoTestWifi via core0 IPC)\n");
+                    "[A2Bus] real CYW43 path (radio stub; DoTestWifi host-complete)\n");
         }
     }
     return cached;
@@ -1126,9 +1157,10 @@ static int a2bus_wifi_hooks(void) {
         }
     }
 
-    /* Empty-SSID only: C++ EH hang. Configured SSID → native DoTestWifi.
-     * DoCommand in BusLoop RAM calls via __DoTestWifi_veneer (0x20004548) —
-     * must begin long_cmd on the veneer too (flash-only begin was missed). */
+    /* Empty-SSID only: C++ EH hang. Configured SSID → host-complete DoTestWifi.
+     * Native path pushes FIFO and sleep-waits for core0 TestWifi IPC; under a2bus
+     * core0 is often blocked in boot NTP (or not yet in core0Loop) so the wait
+     * never finishes — CP locks with BUSY (skip-unstick loops forever). */
     if (pc == USB_GUEST_DO_TEST_WIFI || pc == 0x20004548u) {
         if (mem_read8(USB_GUEST_WIFI_SSID) == 0u) {
             fprintf(stderr, "[A2Bus] DoTestWifi: SSID not set → NETERR_SSIDNOTSET\n");
@@ -1142,35 +1174,31 @@ static int a2bus_wifi_hooks(void) {
             cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
             return 1;
         }
-        if (!a2bus_long_cmd_active())
-            a2bus_long_cmd_begin("DoTestWifi");
-        return 0; /* real DoTestWifi: IPC to core0, FormatIPAddr into dataBuffer */
+        a2bus_host_complete_do_test_wifi();
+        while (a2bus_long_cmd_active())
+            a2bus_long_cmd_end();
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
     }
 
-    /* Core0 TestWifi IPC.
-     * When link is already UP (boot DHCP+NTP succeeded), skip the C++ RunTestWifi
-     * path — EH cannot unwind throws under a2bus → abort → _exit. Fill TestResult
-     * from the live netif lease (same words EvtStart would copy). */
+    /* Core0 TestWifi IPC — always host-complete under a2bus (C++ EH cannot
+     * unwind; also unblocks if DoTestWifi somehow took the native wait path). */
     if (pc == USB_GUEST_TEST_WIFI) {
         if (mem_read8(USB_GUEST_WIFI_SSID) == 0u) {
             /* fall through to empty-SSID handler below */
         } else {
             uint32_t result = cpu.r[0];
-            if (!a2bus_long_cmd_active())
-                a2bus_long_cmd_begin("TestWifi");
-            if (a2bus_link_up_with_ip() && mem_read8(USB_GUEST_RTC_RUNNING_BSS)) {
-                a2bus_fill_test_result(result);
-                fprintf(stderr,
-                        "[A2Bus] TestWifi: link UP + RTC — completed from netif "
-                        "(skip C++ EH path)\n");
-                fflush(stderr);
-                /* Still print like firmware for log continuity */
-                fprintf(stderr, "TestWifi()\n");
-                fflush(stderr);
-                cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-                return 1;
-            }
-            return 0; /* native path if not yet linked */
+            a2bus_fill_test_result(result);
+            fprintf(stderr,
+                    "[A2Bus] TestWifi: host-complete from netif/defaults "
+                    "(skip C++ EH path)\n");
+            fflush(stderr);
+            fprintf(stderr, "TestWifi()\n");
+            fflush(stderr);
+            if (a2bus_long_cmd_active())
+                a2bus_long_cmd_end();
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
         }
     }
 
