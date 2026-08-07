@@ -2458,6 +2458,12 @@ int bramble_ext_guest_hook(void)
     if (!a2bus_bridge_active()) {
         return 0;
     }
+    /* Keep TFTP host-ACK moving even if guest is busy in cyw43 SPI/KSO. */
+    if (a2bus_tftp_bump_malloc) {
+        static unsigned tftp_svc;
+        if ((++tftp_svc & 0x3FFu) == 0u && cyw43.tap_fd >= 0)
+            tapif_service(cyw43.tap_fd);
+    }
     /* WiFi stubs before veneer so DoTestWifi hits SRAM veneer path too. */
     if (a2bus_wifi_hooks()) {
         return 1;

@@ -173,6 +173,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 9. **TFTP Transferring / Blocks:1 then stall (`Unknown transfer ID`)** — guest ACK latency exceeds tftpd timeout under Thumb emu. TAP **host-ACKs** DATA/OACK immediately (windowed ~32 ahead), queues blocks, delivers one at a time to the guest, and does not forward guest ACKs on the wire.
 10. **TFTP assert `WriteBlockForImageTransfer` / Blocks~10** — a2bus stubbed SmartPort `WriteBlock` but not the TFTP image-write path; native SPI erase ran with `InitSpi` skipped → `assert((blockAddress&0xffff)==0)`. Host-complete `WriteBlockForImageTransfer` to SPI backing (same as USB XMODEM).
 11. **TFTP Transferring extremely slow (~3 blk/s)** — each DATA still crawled through guest CYW43 gSPI under Thumb emu. a2bus registers a TAP host-apply callback: host-ACK + write SPI backing + update `tftp_state` / CTFTPRXTask; skip guest CYW43 delivery; Complete on EOF.
+12. **TFTP stalls ~halfway (~37k blocks) after `cyw43_kso_set(0): failed`** — SLEEPCSR always read back 0x03 so guest KSO-clear loop starved TAP poll / host-ACK. Track SLEEPCSR; `tapif_service` always runs UDP NAT; a2bus also services NAT during RunTFTP.
 
 DNS/NTP TAP UDP NAT already proves host sockets work; once RRQ is sent, `192.168.0.10:69` uses the same NAT path (guest is on `192.168.4.0/24`, so LAN TFTP is routed via the fake gw then NAT’d).
 
