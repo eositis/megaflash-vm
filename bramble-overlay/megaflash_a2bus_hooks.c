@@ -932,6 +932,8 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
         return 1;
     if (c0pc >= 0x10004accu && c0pc < 0x10004e00u) /* InitRTC / aon_timer */
         return 1;
+    if (c0pc >= 0x100070b4u && c0pc < 0x10007200u) /* U2_MonPollFlush */
+        return 1;
     if (c0pc >= 0x10018000u && c0pc < 0x1001c000u) /* lwIP / cyw43_arch */
         return 1;
     if (c0pc >= 0x1001f268u && c0pc < 0x1001f2c0u) /* operator new */
@@ -1344,6 +1346,22 @@ static int a2bus_wifi_hooks(void) {
         usb_guest_persist_config_to_host();
         fprintf(stderr, "[A2Bus] SaveTFTPLastServer host-complete ('%s')\n", name);
         fflush(stderr);
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
+    /*
+     * Optioned RRQ (blksize/tsize) is 41 bytes; many LAN tftpd's reply with
+     * ERROR code 0. Plain octet RRQ is 20 bytes and widely accepted.
+     */
+    if (pc == 0x10005570u) { /* GetTFTPEnable1kBlockSize */
+        static int once;
+        if (!once++) {
+            fprintf(stderr,
+                    "[A2Bus] GetTFTPEnable1kBlockSize → 0 (plain RRQ; avoid "
+                    "option ERROR from server)\n");
+            fflush(stderr);
+        }
+        cpu.r[0] = 0u;
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
