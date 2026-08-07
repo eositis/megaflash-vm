@@ -147,6 +147,8 @@ Control-panel **Save** must not run real SPI security-register programming under
 5. **core0 WFI treated as abort** — `a2bus_busy_is_long_command` returned 0 on `cores[CORE0].is_wfi` *before* long_cmd / DoTFTPRun PC checks. TestWifi/TFTP sleep on core0 (cyw43 / FIFO WFE) while core1 holds BUSY → false BUSY timeout → unstick → IP "AG"/blank and DoTFTPRun killed. long_cmd and known PC ranges now win; only guest `_exit` forces unstick.
 6. **DoTestWifi IPC deadlock** — core1 FIFO-pushes and sleep-waits for core0 `TestWifi`; core0 is often still in boot `GetNetworkTime`/RunNTP (or not in `core0Loop`) so `testCompleted` never sets → BUSY forever (skip-unstick loops). **Host-complete `DoTestWifi`** under a2bus (fill TestResult + dataBuffer IPs, clear BUSY).
 7. **core0 never reaches `core0Loop`** — `InitPicoLed`/cyw43 clobbers `r4` (boot `appleConnected`); main takes USB-wait path; `stdio_usb_connected`/`UserTerminal` can park core0. Result: no NTP/clock, DoTFTPRun FIFO wait forever. Force `r4=1` at the post-LED `cbz`, stub USB connected/UserTerminal, force `core0Loop`, and kick `ExecuteTFTP` when DoTFTPRun is waiting.
+8. **CheckPicoW ADC probe during bridge disconnect** — launcher drops the bridge between BusLoop-ready and MAME attach; hooks gated on `bridge_active` missed, so real `CheckPicoW` ADC-caches 0 → `core0Loop` `fifo_pop` forever (no boot NTP, blank CP clock). Force CheckPicoW + seed cache even when bridge is down; always rescue fifo-stuck core0.
+9. **Post-TFTP NTP HardFault** — RunTFTP bump-malloc advances `_sbrk` `heap_end` with no-op free; next `GetNetworkTime`/`pbuf_alloc` HardFaults. Restore pre-TFTP `heap_end` when bump ends.
 
 **TFTP:** Needs live core0 (avoid TestWifi abort). Transfer uses guest lwIP → TAP UDP NAT.
 

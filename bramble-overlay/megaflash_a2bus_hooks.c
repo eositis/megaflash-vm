@@ -659,6 +659,41 @@ static int a2bus_tftp_cs_hooks(uint32_t pc) {
  * ("MegaFlash not found" / no boot from flash volumes).
  */
 static int a2bus_tftp_bump_malloc;
+static uint32_t a2bus_tftp_bump_heap_saved;
+static int a2bus_tftp_bump_heap_valid;
+
+/* CheckPicoW caches result at these BSS bytes (pico2_debug). */
+#define USB_GUEST_PICOW_CHECKED_BSS  0x20061607u
+#define USB_GUEST_PICOW_RESULT_BSS   0x20061608u
+
+static void a2bus_force_picow_true(void) {
+    mem_write8(USB_GUEST_PICOW_CHECKED_BSS, 1u);
+    mem_write8(USB_GUEST_PICOW_RESULT_BSS, 1u);
+}
+
+static void a2bus_tftp_bump_enable(void) {
+    if (!a2bus_tftp_bump_malloc) {
+        a2bus_tftp_bump_heap_saved = mem_read32(USB_GUEST_HEAP_END_PTR);
+        a2bus_tftp_bump_heap_valid = 1;
+        a2bus_tftp_bump_malloc = 1;
+        fprintf(stderr, "[A2Bus] TFTP bump-malloc enabled for RunTFTP\n");
+        fflush(stderr);
+    }
+}
+
+static void a2bus_tftp_bump_disable(const char *why) {
+    if (!a2bus_tftp_bump_malloc)
+        return;
+    a2bus_tftp_bump_malloc = 0;
+    /* Bump advanced _sbrk heap_end while free was a no-op. Restoring the
+     * pre-TFTP break lets post-TFTP RunNTP/pbuf_alloc use a clean heap. */
+    if (a2bus_tftp_bump_heap_valid) {
+        mem_write32(USB_GUEST_HEAP_END_PTR, a2bus_tftp_bump_heap_saved);
+        a2bus_tftp_bump_heap_valid = 0;
+    }
+    fprintf(stderr, "[A2Bus] TFTP bump-malloc disabled (%s)\n", why);
+    fflush(stderr);
+}
 
 static uint32_t a2bus_host_bump_malloc(uint32_t size) {
     uint32_t end;
@@ -881,6 +916,8 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
         return 1;
     if (c0pc == 0x10034cf8u) /* __core0Loop_veneer */
         return 1;
+    if (c0pc >= 0x10004e08u && c0pc < 0x10004ec0u) /* CheckPicoW body */
+        return 1;
     if (c0pc >= 0x1000859cu && c0pc < 0x10008700u) /* GetNetworkTime / TestWifi */
         return 1;
     if (c0pc >= USB_GUEST_EXECUTE_TFTP && c0pc < 0x10008600u)
@@ -890,6 +927,10 @@ static int a2bus_core0_in_network_work(uint32_t c0pc)
     if (c0pc >= 0x10008bacu && c0pc < 0x1000a800u) /* ConnectWifi / CTFTP* */
         return 1;
     if (c0pc >= 0x1000a800u && c0pc < 0x1000b000u) /* gpio helpers used by cyw43/LED */
+        return 1;
+    if (c0pc >= 0x10012000u && c0pc < 0x10013000u) /* adc_init / dns / hw helpers */
+        return 1;
+    if (c0pc >= 0x10004accu && c0pc < 0x10004e00u) /* InitRTC / aon_timer */
         return 1;
     if (c0pc >= 0x10018000u && c0pc < 0x1001c000u) /* lwIP / cyw43_arch */
         return 1;
@@ -925,11 +966,20 @@ static void a2bus_ensure_core0_network_loop(void)
     if (c0pc >= 0x1001a000u && c0pc < 0x10022000u) /* cyw43 driver */
         return;
 
-    if (forced >= 4)
-        return;
-    fprintf(stderr, "[A2Bus] force core0 → core0Loop (was PC=0x%08X)\n", c0pc);
-    fflush(stderr);
-    forced++;
+    /* core0Loop takes fifo-discard when CheckPicoW cached 0 — always rescue.
+     * Early boot used to burn the force budget inside adc_init mid-CheckPicoW. */
+    {
+        int fifo_stuck = (c0pc == 0x10011614u || c0pc == 0x20004408u ||
+                          (c0pc >= 0x10011614u && c0pc < 0x10011650u));
+        if (forced >= 8 && !fifo_stuck)
+            return;
+        fprintf(stderr, "[A2Bus] force core0 → core0Loop (was PC=0x%08X)%s\n",
+                c0pc, fifo_stuck ? " [fifo-stuck]" : "");
+        fflush(stderr);
+        if (!fifo_stuck)
+            forced++;
+    }
+    a2bus_force_picow_true();
     cores[CORE0].is_wfi = 0;
     cores[CORE0].is_halted = 0;
     if (cores[CORE0].r[13] < 0x20070000u || cores[CORE0].r[13] > 0x20082000u)
@@ -1038,11 +1088,35 @@ static void a2bus_ensure_busloop_core1(void) {
     a2bus_ensure_malloc_mutex();
     fprintf(stderr, "[A2Bus] launching BusLoop core1 after radio ready (%s)\n", why);
     fflush(stderr);
+    /* Seed before MAME disconnect window can run real ADC CheckPicoW → cache 0. */
+    a2bus_force_picow_true();
     sio_force_core1_launch(0x20000120u, 0x20081000u, 0);
 }
 
 static int a2bus_wifi_hooks(void) {
-    if (!a2bus_bridge_active() || !cyw43.enabled) {
+    if (!cyw43.enabled) {
+        return 0;
+    }
+    /*
+     * CheckPicoW must work even while the MAME bridge is briefly disconnected
+     * (BusLoop ready → launch apple2c4). Real ADC probe under emu caches 0 →
+     * core0Loop fifo-discard forever → no boot GetNetworkTime / clock.
+     */
+    {
+        uint32_t pc0 = cpu.r[15] & ~1u;
+        if (pc0 == USB_GUEST_CHECK_PICOW_FN || pc0 == 0x20004668u) {
+            static int picow_logged;
+            if (!picow_logged++) {
+                fprintf(stderr, "[A2Bus] CheckPicoW forced true (-wifi)\n");
+                fflush(stderr);
+            }
+            a2bus_force_picow_true();
+            cpu.r[0] = 1u;
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+    }
+    if (!a2bus_bridge_active()) {
         return 0;
     }
     a2bus_ensure_malloc_mutex();
@@ -1069,12 +1143,6 @@ static int a2bus_wifi_hooks(void) {
     }
     if (pc == USB_GUEST_MAIN_USB_LOOP) {
         cpu.r[15] = 0x10000418u | 1u; /* PicoW_ServiceCore0IpcAndNetwork */
-        return 1;
-    }
-    /* Hit CheckPicoW in wifi hooks so core0Loop never takes the fifo-discard path. */
-    if (pc == USB_GUEST_CHECK_PICOW_FN) {
-        cpu.r[0] = 1u;
-        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
 
@@ -1338,24 +1406,16 @@ static int a2bus_wifi_hooks(void) {
 
     /* Gate bump-malloc to RunTFTP only (see a2bus_tftp_bump_malloc). */
     if (pc == USB_GUEST_RUNTFTP) {
-        if (!a2bus_tftp_bump_malloc) {
-            a2bus_tftp_bump_malloc = 1;
-            fprintf(stderr, "[A2Bus] TFTP bump-malloc enabled for RunTFTP\n");
-            fflush(stderr);
-        }
+        a2bus_tftp_bump_enable();
         return 0;
     }
     if (pc == USB_GUEST_RUNTFTP_EPILOGUE && a2bus_tftp_bump_malloc) {
-        a2bus_tftp_bump_malloc = 0;
-        fprintf(stderr, "[A2Bus] TFTP bump-malloc disabled (RunTFTP done)\n");
-        fflush(stderr);
+        a2bus_tftp_bump_disable("RunTFTP done");
         return 0;
     }
     /* EndLegacyOperation — clear bump if RunTFTP aborted via EH. */
     if (pc == 0x10000724u && a2bus_tftp_bump_malloc) {
-        a2bus_tftp_bump_malloc = 0;
-        fprintf(stderr, "[A2Bus] TFTP bump-malloc disabled (EndLegacyOperation)\n");
-        fflush(stderr);
+        a2bus_tftp_bump_disable("EndLegacyOperation");
         return 0;
     }
 
@@ -1861,6 +1921,7 @@ static int a2bus_spi_flash_hooks(void) {
         if (!picow_logged++) {
             fprintf(stderr, "[A2Bus] CheckPicoW forced true (-wifi)\n");
         }
+        a2bus_force_picow_true();
         cpu.r[0] = 1u;
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
@@ -2110,6 +2171,19 @@ static int a2bus_spi_flash_hooks(void) {
 
 int bramble_ext_guest_hook(void)
 {
+    /*
+     * CheckPicoW before the bridge-active gate: the launcher disconnects the
+     * bridge between BusLoop-ready and MAME attach; ADC probe then caches 0.
+     */
+    if (cyw43.enabled) {
+        uint32_t pc = cpu.r[15] & ~1u;
+        if (pc == USB_GUEST_CHECK_PICOW_FN || pc == 0x20004668u) {
+            a2bus_force_picow_true();
+            cpu.r[0] = 1u;
+            cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+            return 1;
+        }
+    }
     if (!a2bus_bridge_active()) {
         return 0;
     }
