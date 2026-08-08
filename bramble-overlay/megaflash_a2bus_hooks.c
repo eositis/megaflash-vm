@@ -735,6 +735,7 @@ static void a2bus_tftp_finish_guest(uint32_t self, uint32_t error_code,
     mem_write8(self + A2BUS_CUDP_COMPLETED, 1u);
     mem_write32(st + 32u, error_code);
     mem_write8(st + 36u, status);
+    tapif_tftp_transfer_done();
 }
 
 /* DoTFTPStatus Time: host wall clock (avoid advancing guest TIMER — that
@@ -782,11 +783,14 @@ static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
         bsz = 512u;
 
     expected = mem_read16(self + A2BUS_CTFTPRX_EXPECTED_BLOCK);
-    if (expected == 0u)
+    /* Initial expect is 1; after block 65535, expect wraps to 0 (do not
+     * coerce 0→1 — that drops the post-wrap DATA/EOF and leaves Transferring). */
+    if (block_recv == 0u && expected == 0u)
         expected = 1u;
     if (blk != expected) {
         /* Retransmit of prior block — already host-ACKed; ignore. */
-        if (blk + 1u == expected)
+        uint16_t behind = (uint16_t)(expected - blk);
+        if (behind >= 1u && behind <= 32u)
             return 1;
         return 1;
     }
@@ -869,7 +873,7 @@ static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
     mem_write8(st + 36u, A2BUS_TFTPSTATUS_TRANSFER);
 
     applied++;
-    if (applied <= 8u || (applied % 256u) == 0u) {
+    if (applied <= 8u || (applied % 256u) == 0u || blk == 0u) {
         fprintf(stderr,
                 "[A2Bus] TFTP host-apply block #%u (tftp=%u written=%u)\n",
                 applied, (unsigned)blk, (unsigned)block_recv);
@@ -882,6 +886,17 @@ static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
                                 A2BUS_TFTPSTATUS_COMPLETED);
         fprintf(stderr,
                 "[A2Bus] TFTP host-apply COMPLETED blocks=%u (512 EOF)\n",
+                (unsigned)block_recv);
+        fflush(stderr);
+        return 1;
+    }
+
+    /* Exact volume fill (e.g. 65536×512) — no empty EOF needed for UI. */
+    if (block_recv >= capacity) {
+        a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_NOERR,
+                                A2BUS_TFTPSTATUS_COMPLETED);
+        fprintf(stderr,
+                "[A2Bus] TFTP host-apply COMPLETED blocks=%u (capacity)\n",
                 (unsigned)block_recv);
         fflush(stderr);
     }
