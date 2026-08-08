@@ -314,6 +314,10 @@ static uint32_t a2bus_put_cstr(uint32_t dest, const char *s)
     return dest + i + 1u;
 }
 
+/* DoTFTPStatus Time: host wall clock (avoid advancing guest TIMER). */
+static int a2bus_tftp_host_start_armed;
+static struct timespec a2bus_tftp_host_start;
+
 /*
  * Native DoTFTPStatus: critical_section (ldaexb) + Format* / sprintf path
  * HardFaults core1 (PC="RunT…" from a status string word). Host-complete from
@@ -353,8 +357,27 @@ static void a2bus_host_do_tftp_status(void)
     }
 
     elapsed = 0u;
-    if (start != 0u && timer_state.time_us >= start)
+    /* Prefer host-wall elapsed during RunTFTP — do not advance guest TIMER
+     * (that fires timeouts → abort → kills the tftpd session). */
+    if (a2bus_tftp_host_start_armed) {
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0) {
+            uint64_t us = (uint64_t)(now.tv_sec - a2bus_tftp_host_start.tv_sec)
+                          * 1000000ull;
+            if (now.tv_nsec >= a2bus_tftp_host_start.tv_nsec)
+                us += (uint64_t)(now.tv_nsec - a2bus_tftp_host_start.tv_nsec)
+                      / 1000ull;
+            else {
+                us -= 1000000ull;
+                us += (uint64_t)(now.tv_nsec + 1000000000L
+                                 - a2bus_tftp_host_start.tv_nsec)
+                      / 1000ull;
+            }
+            elapsed = (uint32_t)(us / 1000000ull);
+        }
+    } else if (start != 0u && timer_state.time_us >= start) {
         elapsed = (uint32_t)((timer_state.time_us - start) / 1000000ull);
+    }
     if (elapsed > 0xffffu)
         elapsed = 0xffffu;
 
@@ -714,37 +737,14 @@ static void a2bus_tftp_finish_guest(uint32_t self, uint32_t error_code,
     mem_write8(st + 36u, status);
 }
 
-/* Host-apply spends wall time in C; guest TIMER only ticks on emu steps / WFI.
- * Advance TIMER0 from host monotonic so DoTFTPStatus Time + delay_ms move. */
-static int a2bus_tftp_timer_armed;
-static struct timespec a2bus_tftp_timer_last;
-
-static void a2bus_tftp_advance_guest_timer(void)
+/* DoTFTPStatus Time: host wall clock (avoid advancing guest TIMER — that
+ * fires cyw43/TFTP timeouts → abort/_exit and can ERROR the tftpd session). */
+static void a2bus_tftp_host_time_arm(void)
 {
-    struct timespec now;
-    uint64_t delta_us;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    if (a2bus_tftp_host_start_armed)
         return;
-    if (!a2bus_tftp_timer_armed) {
-        a2bus_tftp_timer_last = now;
-        a2bus_tftp_timer_armed = 1;
-        return;
-    }
-    delta_us = (uint64_t)(now.tv_sec - a2bus_tftp_timer_last.tv_sec) * 1000000ull;
-    if (now.tv_nsec >= a2bus_tftp_timer_last.tv_nsec)
-        delta_us += (uint64_t)(now.tv_nsec - a2bus_tftp_timer_last.tv_nsec) / 1000ull;
-    else {
-        delta_us -= 1000000ull;
-        delta_us += (uint64_t)(now.tv_nsec + 1000000000L - a2bus_tftp_timer_last.tv_nsec)
-                    / 1000ull;
-    }
-    a2bus_tftp_timer_last = now;
-    if (delta_us == 0ull)
-        return;
-    if (delta_us > 50000ull) /* match WFI wall-clock cap */
-        delta_us = 50000ull;
-    timer_tick((uint32_t)delta_us);
+    if (clock_gettime(CLOCK_MONOTONIC, &a2bus_tftp_host_start) == 0)
+        a2bus_tftp_host_start_armed = 1;
 }
 
 /*
@@ -763,7 +763,7 @@ static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
 
     if (!a2bus_bridge_active() || !payload || len < 4)
         return 0;
-    a2bus_tftp_advance_guest_timer();
+    a2bus_tftp_host_time_arm();
     op = ((uint16_t)payload[0] << 8) | payload[1];
     if (op != 3u) /* DATA only; OACK still via guest if ever used */
         return 0;
@@ -893,7 +893,7 @@ static void a2bus_tftp_bump_enable(void) {
         a2bus_tftp_bump_heap_saved = mem_read32(USB_GUEST_HEAP_END_PTR);
         a2bus_tftp_bump_heap_valid = 1;
         a2bus_tftp_bump_malloc = 1;
-        a2bus_tftp_timer_armed = 0;
+        a2bus_tftp_host_start_armed = 0;
         tapif_set_tftp_data_apply(a2bus_tftp_data_apply);
         fprintf(stderr,
                 "[A2Bus] TFTP bump-malloc enabled for RunTFTP "
@@ -906,6 +906,7 @@ static void a2bus_tftp_bump_disable(const char *why) {
     if (!a2bus_tftp_bump_malloc)
         return;
     a2bus_tftp_bump_malloc = 0;
+    a2bus_tftp_host_start_armed = 0;
     tapif_set_tftp_data_apply(NULL);
     /* Bump advanced _sbrk heap_end while free was a no-op. Restoring the
      * pre-TFTP break lets post-TFTP RunNTP/pbuf_alloc use a clean heap. */
@@ -2496,8 +2497,7 @@ int bramble_ext_guest_hook(void)
     /* Keep TFTP host-ACK moving even if guest is busy in cyw43 SPI/KSO. */
     if (a2bus_tftp_bump_malloc) {
         static unsigned tftp_svc;
-        a2bus_tftp_advance_guest_timer();
-        if ((++tftp_svc & 0xFFu) == 0u && cyw43.tap_fd >= 0)
+        if ((++tftp_svc & 0x7Fu) == 0u && cyw43.tap_fd >= 0)
             tapif_service(cyw43.tap_fd);
     }
     /* WiFi stubs before veneer so DoTestWifi hits SRAM veneer path too. */
