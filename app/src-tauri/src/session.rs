@@ -22,71 +22,87 @@ pub struct SessionStatus {
     pub pty_path: String,
 }
 
+struct ProcSlots {
+    pico: Option<Child>,
+    mame: Option<Child>,
+    a2bus_bramble: Option<Child>,
+    pty_writer: Option<File>,
+    log_file: Option<File>,
+}
+
 pub struct SessionState {
     pub settings: Mutex<Settings>,
-    pico: Mutex<Option<Child>>,
-    mame: Mutex<Option<Child>>,
-    a2bus_bramble: Mutex<Option<Child>>,
-    pty_writer: Mutex<Option<File>>,
+    procs: Mutex<ProcSlots>,
     stop_reader: Arc<AtomicBool>,
-    log_file: Mutex<Option<File>>,
 }
 
 impl SessionState {
     pub fn new(settings: Settings) -> Self {
         Self {
             settings: Mutex::new(settings),
-            pico: Mutex::new(None),
-            mame: Mutex::new(None),
-            a2bus_bramble: Mutex::new(None),
-            pty_writer: Mutex::new(None),
+            procs: Mutex::new(ProcSlots {
+                pico: None,
+                mame: None,
+                a2bus_bramble: None,
+                pty_writer: None,
+                log_file: None,
+            }),
             stop_reader: Arc::new(AtomicBool::new(false)),
-            log_file: Mutex::new(None),
         }
     }
 
     pub fn status(&self) -> SessionStatus {
-        let settings = self.settings.lock().unwrap().clone();
+        let pty_path = self
+            .settings
+            .lock()
+            .map(|s| s.usb_console_pty.clone())
+            .unwrap_or_else(|_| "/tmp/bramble-usb-console".into());
+        let procs = self.procs.lock().unwrap_or_else(|e| e.into_inner());
         SessionStatus {
-            pico_running: self.pico.lock().unwrap().is_some(),
-            mame_running: self.mame.lock().unwrap().is_some(),
-            pico_pid: self
-                .pico
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|c| c.id()),
-            mame_pid: self.mame.lock().unwrap().as_ref().map(|c| c.id()),
-            bramble_a2bus_pid: self
-                .a2bus_bramble
-                .lock()
-                .unwrap()
-                .as_ref()
-                .map(|c| c.id()),
-            pty_path: settings.usb_console_pty.clone(),
+            pico_running: procs.pico.is_some(),
+            mame_running: procs.mame.is_some(),
+            pico_pid: procs.pico.as_ref().map(|c| c.id()),
+            mame_pid: procs.mame.as_ref().map(|c| c.id()),
+            bramble_a2bus_pid: procs.a2bus_bramble.as_ref().map(|c| c.id()),
+            pty_path,
         }
+    }
+
+    pub fn get_settings_clone(&self) -> Settings {
+        self.settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn set_settings(&self, settings: Settings) {
+        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
     }
 }
 
-fn kill_child(slot: &Mutex<Option<Child>>) {
-    if let Some(mut child) = slot.lock().unwrap().take() {
-        let _ = child.kill();
-        let _ = child.wait();
+fn kill_opt(child: &mut Option<Child>) {
+    if let Some(mut c) = child.take() {
+        let _ = c.kill();
+        let _ = c.wait();
     }
 }
 
 pub fn stop_pico(state: &SessionState) {
     state.stop_reader.store(true, Ordering::SeqCst);
-    *state.pty_writer.lock().unwrap() = None;
-    *state.log_file.lock().unwrap() = None;
-    kill_child(&state.pico);
-    thread::sleep(Duration::from_millis(150));
+    {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        procs.pty_writer = None;
+        procs.log_file = None;
+        kill_opt(&mut procs.pico);
+    }
+    thread::sleep(Duration::from_millis(100));
     state.stop_reader.store(false, Ordering::SeqCst);
 }
 
 pub fn stop_mame(state: &SessionState) {
-    kill_child(&state.mame);
-    kill_child(&state.a2bus_bramble);
+    let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+    kill_opt(&mut procs.mame);
+    kill_opt(&mut procs.a2bus_bramble);
 }
 
 fn spi_args(settings: &Settings) -> Vec<String> {
@@ -114,26 +130,27 @@ fn wait_for_pty(path: &Path, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < timeout {
         if path.exists() {
-            // ensure openable
             if File::options().read(true).write(true).open(path).is_ok() {
                 return Ok(());
             }
         }
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(50));
     }
     bail!("USB console PTY did not appear: {}", path.display())
 }
 
-pub fn start_pico(app: AppHandle, state: &SessionState) -> Result<()> {
-    if state.pico.lock().unwrap().is_some() {
-        bail!("Pico session already running");
-    }
-    if state.mame.lock().unwrap().is_some() && !state.settings.lock().unwrap().allow_concurrent_windows
+pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
+    // Lock order: settings before procs (must match status()).
+    let settings = state.get_settings_clone();
     {
-        bail!("Stop the Apple //c session first (concurrent mode disabled)");
+        let procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        if procs.pico.is_some() {
+            bail!("Pico session already running");
+        }
+        if procs.mame.is_some() && !settings.allow_concurrent_windows {
+            bail!("Stop the Apple //c session first (concurrent mode disabled)");
+        }
     }
-
-    let settings = state.settings.lock().unwrap().clone();
     let root = PathBuf::from(&settings.megaflash_vm_root);
     let bramble = resolve_bramble(&root)?;
     let uf2 = PathBuf::from(&settings.uf2_path);
@@ -163,7 +180,10 @@ pub fn start_pico(app: AppHandle, state: &SessionState) -> Result<()> {
         .stderr(Stdio::piped());
 
     let child = cmd.spawn().context("spawn bramble (pico console)")?;
-    *state.pico.lock().unwrap() = Some(child);
+    {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        procs.pico = Some(child);
+    }
 
     wait_for_pty(&pty, Duration::from_secs(30))?;
 
@@ -177,55 +197,60 @@ pub fn start_pico(app: AppHandle, state: &SessionState) -> Result<()> {
         .write(true)
         .open(&pty)
         .context("open PTY for write")?;
-    *state.pty_writer.lock().unwrap() = Some(writer);
 
-    if settings.console_log_enabled {
-        if let Some(parent) = Path::new(&settings.console_log_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
+    let mut log_for_thread: Option<File> = None;
+    {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        procs.pty_writer = Some(writer);
+        if settings.console_log_enabled {
+            if let Some(parent) = Path::new(&settings.console_log_path).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let log = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&settings.console_log_path)
+                .ok();
+            if let Some(ref log) = log {
+                log_for_thread = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&settings.console_log_path)
+                    .ok();
+                let _ = log;
+            }
+            procs.log_file = log_for_thread
+                .as_ref()
+                .and_then(|_| {
+                    OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&settings.console_log_path)
+                        .ok()
+                });
+            log_for_thread = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&settings.console_log_path)
+                .ok();
         }
-        let log = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&settings.console_log_path)
-            .ok();
-        *state.log_file.lock().unwrap() = log;
     }
 
     let stop = state.stop_reader.clone();
-    let log_slot = Arc::new(Mutex::new(
-        state.log_file.lock().unwrap().take(),
-    ));
-    // keep shared log in state too
-    if let Ok(mut lf) = log_slot.lock() {
-        if lf.is_some() {
-            // duplicate handle by reopening
-            *state.log_file.lock().unwrap() = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&settings.console_log_path)
-                .ok();
-            *lf = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&settings.console_log_path)
-                .ok();
-        }
-    }
-
     let app2 = app.clone();
+    let state2 = Arc::clone(state);
     thread::spawn(move || {
         let mut reader = reader;
         let mut buf = [0u8; 4096];
+        let mut log = log_for_thread;
         while !stop.load(Ordering::SeqCst) {
             match reader.read(&mut buf) {
                 Ok(0) => thread::sleep(Duration::from_millis(20)),
                 Ok(n) => {
                     let chunk = buf[..n].to_vec();
-                    if let Ok(mut log) = log_slot.lock() {
-                        if let Some(f) = log.as_mut() {
-                            let _ = f.write_all(&chunk);
-                            let _ = f.flush();
-                        }
+                    if let Some(f) = log.as_mut() {
+                        let _ = f.write_all(&chunk);
+                        let _ = f.flush();
                     }
                     let _ = app2.emit("console-data", chunk);
                 }
@@ -236,6 +261,7 @@ pub fn start_pico(app: AppHandle, state: &SessionState) -> Result<()> {
                 Err(_) => break,
             }
         }
+        let _ = state2;
     });
 
     let _ = app.emit("session-status", state.status());
@@ -243,15 +269,15 @@ pub fn start_pico(app: AppHandle, state: &SessionState) -> Result<()> {
 }
 
 pub fn write_console(state: &SessionState, data: &[u8]) -> Result<()> {
-    let settings = state.settings.lock().unwrap().clone();
-    let mut guard = state.pty_writer.lock().unwrap();
-    let Some(w) = guard.as_mut() else {
+    let settings = state.get_settings_clone();
+    let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(w) = procs.pty_writer.as_mut() else {
         bail!("console not connected");
     };
     w.write_all(data).context("write PTY")?;
     w.flush()?;
     if settings.console_log_enabled && !settings.console_log_rx_only {
-        if let Some(log) = state.log_file.lock().unwrap().as_mut() {
+        if let Some(log) = procs.log_file.as_mut() {
             let _ = log.write_all(b"[TX]");
             let _ = log.write_all(data);
             let _ = log.flush();
@@ -261,27 +287,26 @@ pub fn write_console(state: &SessionState, data: &[u8]) -> Result<()> {
 }
 
 pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
-    // Exclusive handoff unless concurrent allowed
-    let concurrent = state.settings.lock().unwrap().allow_concurrent_windows;
-    if !concurrent {
+    let settings = state.get_settings_clone();
+    if !settings.allow_concurrent_windows {
         stop_pico(state);
     }
-    if state.mame.lock().unwrap().is_some() {
-        bail!("MAME session already running");
+    {
+        let procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        if procs.mame.is_some() {
+            bail!("MAME session already running");
+        }
     }
 
-    let settings = state.settings.lock().unwrap().clone();
     let root = PathBuf::from(&settings.megaflash_vm_root);
     let script = root.join("scripts/run-megaflash-mame.sh");
     if !script.is_file() {
         bail!("missing {}", script.display());
     }
 
-    // Stage ROM path via env
     let scale = settings.screen_scale.max(1);
-    // Apple //c roughly 560x384 hi-res doubled for window; use integer scale of 280x192*2 base
-    let w = 560 * scale as u32 / 2;
-    let h = 384 * scale as u32 / 2;
+    let w = 560 * u32::from(scale) / 2;
+    let h = 384 * u32::from(scale) / 2;
     let resolution = format!("{w}x{h}");
 
     let mut cmd = Command::new("bash");
@@ -308,35 +333,29 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
         cmd.env("NO_WIFI", "1");
     }
 
-    // Pass extra MAME args via wrapper env consumed if we extend script; for now
-    // inject through a small env the launcher can ignore, and also set MAME extras
-    // by appending after -- if script supports. Patch: use MAME_EXTRA_ARGS.
     let mut extra = vec!["-resolution".to_string(), resolution];
     if settings.color_mode == "bw" || settings.color_mode == "mono" {
-        // MAME effect approximating B&W CRT
         extra.push("-effect".into());
         extra.push("none".into());
         extra.push("-brightness".into());
         extra.push("0.85".into());
         extra.push("-contrast".into());
         extra.push("1.2".into());
-        // apple2 specific: -artpath unused; use video none filters
     }
     cmd.env("MAME_EXTRA_ARGS", extra.join(" "));
 
     let child = cmd.spawn().context("spawn run-megaflash-mame.sh")?;
-    *state.mame.lock().unwrap() = Some(child);
+    {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        procs.mame = Some(child);
+    }
     let _ = app.emit("session-status", state.status());
     Ok(())
 }
 
-/// Send a path string for XMODEM menu-driven upload: type menu keys then path via host tools.
-/// v1: write bytes to ask UserTerminal to enter upload mode is firmware-specific;
-/// we expose a helper that runs tio/sx when available, else instructs via console text.
 pub fn xmodem_upload_hint(path: &str) -> String {
     format!(
-        "\r\n[Operator] XMODEM upload: in the USB menu choose upload, then run:\r\n  sx -b {path}\r\n  or: tio {pty}  (Ctrl-T x)\r\n",
-        path = path,
-        pty = "/tmp/bramble-usb-console"
+        "\r\n[Operator] XMODEM upload: in the USB menu choose upload, then run:\r\n  sx -b {path}\r\n  or: tio /tmp/bramble-usb-console  (Ctrl-T x)\r\n",
+        path = path
     )
 }

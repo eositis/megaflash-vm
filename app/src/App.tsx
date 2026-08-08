@@ -15,13 +15,12 @@ function App() {
   const [msg, setMsg] = useState("");
 
   const refresh = async () => {
-    const [s, st, n] = await Promise.all([
-      api.getSettings(),
-      api.getSessionStatus(),
-      api.netHelperStatus(),
-    ]);
+    // Sequential invokes — avoid overlapping sync IPC on the UI thread.
+    const s = await api.getSettings();
     setSettings(s);
+    const st = await api.getSessionStatus();
     setStatus(st);
+    const n = await api.netHelperStatus();
     setNet(n);
   };
 

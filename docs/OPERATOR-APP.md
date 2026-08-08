@@ -59,3 +59,7 @@ Creating a utun for Bramble may still require elevation the first time unless su
 ## Architecture note
 
 USB console mode must **not** use `-a2bus-bridge` / Apple stubs (firmware skips the USB menu when Apple is “connected”). MAME mode uses the opposite. Concurrent USB + MAME needs two Bramble processes and firmware/host support; scaffolded only in v1.
+
+## Responsiveness (Tauri IPC)
+
+Tauri commands that touch session mutexes or spawn/wait on processes are **`async` + `spawn_blocking`**, and the UI refreshes settings/status/net sequentially (not `Promise.all`). Session code locks **settings before procs** so `status()` cannot deadlock with start/stop. Without that, overlapping sync IPC on the main thread caused a macOS beachball at launch.

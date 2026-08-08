@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark;
-  font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  font-family: "Avenir Next", "Segoe UI", system-ui, sans-serif;
   line-height: 1.4;
   font-weight: 400;
   color: #e8ecef;
@@ -46,7 +46,7 @@ body {
   margin: 0;
   font-size: 1.35rem;
   letter-spacing: 0.02em;
-  font-family: "IBM Plex Serif", Georgia, serif;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
 }
 
 .sub {
