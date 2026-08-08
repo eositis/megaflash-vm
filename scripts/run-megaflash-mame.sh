@@ -226,13 +226,14 @@ fi
 echo "[mame] starting Bramble MegaFlash bridge on 127.0.0.1:$PORT"
 
 if [[ "$HOST_NET" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
-  if [[ ! -f "$ASKPASS" ]]; then
-    echo "askpass helper missing: $ASKPASS" >&2
-    exit 1
+  NET_HELPER="${MEGAFLASH_NET_HELPER:-/usr/local/libexec/megaflash-net-helper.sh}"
+  USE_PASSWORDLESS=0
+  if [[ -x "$NET_HELPER" ]] && sudo -n "$NET_HELPER" status >/dev/null 2>&1; then
+    USE_PASSWORDLESS=1
+    echo "[mame] using passwordless network helper: $NET_HELPER"
+    sudo -n "$NET_HELPER" enable || true
   fi
-  chmod +x "$ASKPASS" "$HOST_NET_PREP" 2>/dev/null || true
-  export SUDO_ASKPASS="$ASKPASS"
-  export SUDO_ASKPASS_PROMPT="MegaFlash needs administrator access to create a utun interface and enable pf NAT so guest Wi‑Fi (192.168.4.0/24) can reach DNS/NTP on the internet."
+
   RUN_DIR="$ROOT/.run"
   mkdir -p "$RUN_DIR"
   RUNNER="$RUN_DIR/start-bramble-hostnet.sh"
@@ -242,7 +243,9 @@ if [[ "$HOST_NET" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
     echo "export BRAMBLE_ESCALATED=1"
     echo "export BRAMBLE_ROOT=$(printf '%q' "$BRAMBLE_ROOT")"
     echo "export PATH=$(printf '%q' "$PATH")"
-    echo "$(printf '%q' "$HOST_NET_PREP") enable || true"
+    if [[ "$USE_PASSWORDLESS" -eq 0 ]]; then
+      echo "$(printf '%q' "$HOST_NET_PREP") enable || true"
+    fi
     echo "cd $(printf '%q' "$ROOT")"
     printf 'exec'
     printf ' %q' "$BRAMBLE" "$UF2" \
@@ -257,11 +260,31 @@ if [[ "$HOST_NET" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
     echo
   } >"$RUNNER"
   chmod +x "$RUNNER"
-  echo "[mame] requesting macOS admin approval for utun + pf NAT (dialog)…"
-  # One elevated process: pf enable then Bramble as root (BRAMBLE_ESCALATED skips re-exec).
-  sudo -A -E "$RUNNER" &
-  BRAMBLE_PID=$!
-  BRAMBLE_ELEVATED=1
+
+  if [[ "$USE_PASSWORDLESS" -eq 1 ]]; then
+    # Elevate Bramble for utun without interactive askpass when possible.
+    if sudo -n true 2>/dev/null; then
+      sudo -n -E "$RUNNER" &
+      BRAMBLE_PID=$!
+      BRAMBLE_ELEVATED=1
+    else
+      USE_PASSWORDLESS=0
+    fi
+  fi
+
+  if [[ "$USE_PASSWORDLESS" -eq 0 ]] || [[ -z "${BRAMBLE_PID:-}" ]]; then
+    if [[ ! -f "$ASKPASS" ]]; then
+      echo "askpass helper missing: $ASKPASS" >&2
+      exit 1
+    fi
+    chmod +x "$ASKPASS" "$HOST_NET_PREP" 2>/dev/null || true
+    export SUDO_ASKPASS="$ASKPASS"
+    export SUDO_ASKPASS_PROMPT="MegaFlash needs administrator access to create a utun interface and enable pf NAT so guest Wi‑Fi (192.168.4.0/24) can reach DNS/NTP on the internet."
+    echo "[mame] requesting macOS admin approval for utun + pf NAT (dialog)…"
+    sudo -A -E "$RUNNER" &
+    BRAMBLE_PID=$!
+    BRAMBLE_ELEVATED=1
+  fi
 elif [[ "$HOST_NET" -eq 1 ]]; then
   # Linux: Bramble sudo-reexeces for TAP; iptables/nft is separate.
   echo "[mame] host network: Bramble may prompt for sudo to create TAP"
@@ -348,6 +371,9 @@ echo "[mame] pluginspath=$PLUGINPATH"
 # Do not exec: the EXIT trap must kill Bramble when MAME exits.
 set +e
 # scripts/mame_cfg: Open-Apple = Left Option or Left ⌘ (physical left solid-apple).
+# Optional extras from MegaFlash Operator (resolution / B&W tweaks).
+# shellcheck disable=SC2206
+MAME_EXTRA=( ${MAME_EXTRA_ARGS:-} )
 "$MAME_BIN" apple2c4 \
   -rompath "$ROMPATH" \
   -cfg_directory "$ROOT/scripts/mame_cfg" \
@@ -355,7 +381,8 @@ set +e
   -plugins \
   -plugin megaflash_bridge \
   -skip_gameinfo \
-  -window
+  -window \
+  "${MAME_EXTRA[@]}"
 mame_rc=$?
 set -e
 exit "$mame_rc"

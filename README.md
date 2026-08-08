@@ -20,6 +20,7 @@ cmake -B build && make -C build bramble
 
 | Path | Role |
 |------|------|
+| [`app/`](app/) | **MegaFlash Operator** macOS UI (Tauri) — Pico console + //c handoff |
 | [`scripts/run-megaflash-mame.sh`](scripts/run-megaflash-mame.sh) | Start overlay Bramble + wait for BusLoop + launch `mame apple2c4` |
 | [`scripts/run-megaflash-usb-console.sh`](scripts/run-megaflash-usb-console.sh) | USB CDC UserTerminal (PTY/TCP) — **no** Apple-bus stub |
 | [`scripts/connect-usb-console.sh`](scripts/connect-usb-console.sh) | Attach `screen`/`nc` to the USB console |
@@ -29,6 +30,7 @@ cmake -B build && make -C build bramble
 | [`scripts/a2bus-probe-settings.py`](scripts/a2bus-probe-settings.py) | Host probe of MegaFlash commands over the TCP bridge |
 | [`firmware/`](firmware/) | Guest `megaflash.uf2` / `.elf` (gitignored binaries) |
 | [`flash/`](flash/) | SPI volume backing files (gitignored `*.bin`) |
+| [`docs/OPERATOR-APP.md`](docs/OPERATOR-APP.md) | Operator desktop app guide |
 | [`docs/MAME-BRIDGE.md`](docs/MAME-BRIDGE.md) | MAME operator guide |
 | [`docs/USB-CONSOLE.md`](docs/USB-CONSOLE.md) | USB CDC diagnostic terminal guide |
 | [`docs/TIO-CONSOLE.md`](docs/TIO-CONSOLE.md) | tio attach / XMODEM / quit |
@@ -52,6 +54,15 @@ GitHub/
 | `A2DeskTop.hdv` | Reference ProDOS image for volume 1 (optional) |
 
 Refresh UF2/ELF after a MegaFlash rebuild: `./scripts/sync-firmware-from-megaflash.sh`
+
+## Quick start — Operator app (macOS)
+
+```bash
+cd app && npm install && npm run tauri dev
+# or build: npm run tauri build
+```
+
+See [`docs/OPERATOR-APP.md`](docs/OPERATOR-APP.md).
 
 ## Quick start — MAME
 
