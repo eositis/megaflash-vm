@@ -177,6 +177,7 @@ Control-panel **Save** must not run real SPI security-register programming under
 13. **TFTP stalls ~41k + Time stuck ~3s after `cyw43_kso_set(1): failed`** — wake poll needs SLEEPCSR `KSO|DEVON` (0x03); storing write-as-is (0x01) failed wake → `delay_ms` busy-loops while guest TIMER starved under host-apply. OR DEVON on KSO set; advance TIMER0 from host monotonic during RunTFTP/host-apply.
 14. **TFTP stalls ~27k with Time climbing; core0 `abort`→`_exit` mid-transfer** — wall-clock TIMER advance fired guest timeouts; guest ERROR can kill tftpd. DoTFTPStatus Time from host clock only (no TIMER spike); drop guest ERROR while proxying; protect TFTP flow from NAT eviction; keepalive re-ACK.
 15. **TFTP reaches Blocks 65535 Transferring forever** — uint16 block wrap: `blk <= last` and `expected==0→1` dropped post-65535 DATA/EOF. Wrap-safe retransmit check; honor expect 0; COMPLETE on capacity fill; stop keepalive.
+16. **TFTP stalls ~8733 with keepalive + `Unknown transfer ID`** — host-apply ACKed *before* apply, and apply returned success for ahead-of-expected blocks, so TAP advanced while guest `expected` stuck; server eventually closed, then keepalive re-ACKed a dead TID. Host-apply path now ACKs only after a successful apply; apply returns 0 for unexpected/weird sizes; keepalive is 2s and stops on server ERROR.
 
 DNS/NTP TAP UDP NAT already proves host sockets work; once RRQ is sent, `192.168.0.10:69` uses the same NAT path (guest is on `192.168.4.0/24`, so LAN TFTP is routed via the fake gw then NAT’d).
 

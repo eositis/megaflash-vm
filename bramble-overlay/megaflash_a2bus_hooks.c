@@ -788,11 +788,12 @@ static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
     if (block_recv == 0u && expected == 0u)
         expected = 1u;
     if (blk != expected) {
-        /* Retransmit of prior block — already host-ACKed; ignore. */
+        /* Retransmit of prior — proxy ACKs; do not claim apply success for
+         * ahead-of-expected blocks (that advanced last_enqueued wrongly). */
         uint16_t behind = (uint16_t)(expected - blk);
         if (behind >= 1u && behind <= 32u)
             return 1;
-        return 1;
+        return 0;
     }
 
     if (block_recv == 0u) {
@@ -832,7 +833,7 @@ static int a2bus_tftp_data_apply(const uint8_t *payload, int len,
     }
 
     if (data_size != bsz && !(bsz == 1024u && data_size == 512u))
-        return 1; /* discard weird sizes */
+        return 0; /* weird size — do not ACK */
 
     if (block_recv >= capacity) {
         a2bus_tftp_finish_guest(self, A2BUS_TFTPERROR_OVERSIZE,
