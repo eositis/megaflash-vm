@@ -1,4 +1,5 @@
 use crate::settings::{resolve_bramble, Settings};
+use crate::xmodem;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
@@ -223,7 +224,46 @@ fn open_pty_rw(path: &Path) -> Result<File> {
         .open(path)
         .with_context(|| format!("open PTY {}", path.display()))?;
     configure_pty_raw(&file)?;
+    // Non-blocking reads so XMODEM / console loops can poll with timeouts.
+    {
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        use std::os::fd::AsFd;
+        let flags = fcntl(file.as_fd(), FcntlArg::F_GETFL).context("F_GETFL")?;
+        let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        fcntl(file.as_fd(), FcntlArg::F_SETFL(flags)).context("F_SETFL O_NONBLOCK")?;
+    }
     Ok(file)
+}
+
+fn spawn_console_reader(
+    app: AppHandle,
+    state: &Arc<SessionState>,
+    mut reader: File,
+    mut log_for_thread: Option<File>,
+) {
+    let stop = state.stop_reader.clone();
+    let app2 = app;
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while !stop.load(Ordering::SeqCst) {
+            match reader.read(&mut buf) {
+                Ok(0) => thread::sleep(Duration::from_millis(20)),
+                Ok(n) => {
+                    let chunk = buf[..n].to_vec();
+                    if let Some(f) = log_for_thread.as_mut() {
+                        let _ = f.write_all(&chunk);
+                        let _ = f.flush();
+                    }
+                    let _ = app2.emit("console-data", chunk);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
@@ -324,36 +364,82 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
         }
     }
 
-    let stop = state.stop_reader.clone();
-    let app2 = app.clone();
-    let state2 = Arc::clone(state);
-    thread::spawn(move || {
-        let mut reader = reader;
-        let mut buf = [0u8; 4096];
-        let mut log = log_for_thread;
-        while !stop.load(Ordering::SeqCst) {
-            match reader.read(&mut buf) {
-                Ok(0) => thread::sleep(Duration::from_millis(20)),
-                Ok(n) => {
-                    let chunk = buf[..n].to_vec();
-                    if let Some(f) = log.as_mut() {
-                        let _ = f.write_all(&chunk);
-                        let _ = f.flush();
-                    }
-                    let _ = app2.emit("console-data", chunk);
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
-            }
-        }
-        let _ = state2;
-    });
+    state.stop_reader.store(false, Ordering::SeqCst);
+    spawn_console_reader(app.clone(), state, reader, log_for_thread);
 
     let _ = app.emit("session-status", state.status());
     Ok(())
+}
+
+/// Send a file with XMODEM-CRC over the live Pico PTY.
+///
+/// Prerequisite: in the USB menu choose Upload → drive → type CONFIRM, then
+/// wait until the console shows `C` characters. External `sx`/`tio` cannot share
+/// this PTY while Operator holds it.
+pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> Result<String> {
+    if !path.is_file() {
+        bail!("file not found: {}", path.display());
+    }
+    let settings = state.get_settings_clone();
+    let pty_path = PathBuf::from(&settings.usb_console_pty);
+
+    {
+        let procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        if procs.pico.is_none() || procs.pty_writer.is_none() {
+            bail!("Start Pico first");
+        }
+    }
+
+    // Pause console reader so we exclusively own PTY RX for ACKs.
+    state.stop_reader.store(true, Ordering::SeqCst);
+    thread::sleep(Duration::from_millis(150));
+
+    let mut writer = {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        procs
+            .pty_writer
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("console not connected"))?
+    };
+    let mut reader = open_pty_rw(&pty_path).context("open PTY for XMODEM read")?;
+
+    let note = format!(
+        "\r\n[Operator] XMODEM sending {} …\r\n",
+        path.file_name().and_then(|s| s.to_str()).unwrap_or("file")
+    );
+    let _ = app.emit("console-data", note.as_bytes().to_vec());
+
+    let result = xmodem::send_file(&mut reader, &mut writer, path);
+
+    // Restore writer + reader thread.
+    {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        procs.pty_writer = Some(writer);
+    }
+    state.stop_reader.store(false, Ordering::SeqCst);
+    let log = if settings.console_log_enabled {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&settings.console_log_path)
+            .ok()
+    } else {
+        None
+    };
+    spawn_console_reader(app.clone(), state, reader, log);
+
+    match result {
+        Ok(n) => {
+            let msg = format!("\r\n[Operator] XMODEM sent {n} bytes OK\r\n");
+            let _ = app.emit("console-data", msg.as_bytes().to_vec());
+            Ok(format!("Sent {n} bytes"))
+        }
+        Err(e) => {
+            let msg = format!("\r\n[Operator] XMODEM failed: {e}\r\n");
+            let _ = app.emit("console-data", msg.as_bytes().to_vec());
+            Err(e)
+        }
+    }
 }
 
 pub fn write_console(state: &SessionState, data: &[u8]) -> Result<()> {
@@ -445,7 +531,9 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
 
 pub fn xmodem_upload_hint(path: &str) -> String {
     format!(
-        "\r\n[Operator] XMODEM upload: in the USB menu choose upload, then run:\r\n  sx -b {path}\r\n  or: tio /tmp/bramble-usb-console  (Ctrl-T x)\r\n",
+        "\r\n[Operator] XMODEM: in USB menu choose 2) Upload → drive → type CONFIRM.\r\n\
+When you see CCCCC, click “XMODEM upload…” and pick:\r\n  {path}\r\n\
+(Operator sends XMODEM on this PTY — do not also run sx/tio on the same port.)\r\n",
         path = path
     )
 }

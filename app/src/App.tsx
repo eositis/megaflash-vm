@@ -271,13 +271,16 @@ function App() {
                 type="button"
                 disabled={busy || !status.picoRunning}
                 onClick={() =>
-                  void pickFile().then(async (p) => {
+                  void run(async () => {
+                    const p = await pickFile([
+                      { name: "ProDOS image", extensions: ["po", "hdv", "bin", "img"] },
+                    ]);
                     if (!p) return;
                     const hint = await api.xmodemUploadMessage(p);
                     await api.writeConsole(new TextEncoder().encode(hint));
-                    setMsg(
-                      "XMODEM: use firmware menu upload, then sx/tio as printed in console"
-                    );
+                    setMsg("Waiting for receiver C / sending XMODEM…");
+                    const result = await api.xmodemUpload(p);
+                    setMsg(result);
                   })
                 }
               >
@@ -290,7 +293,7 @@ function App() {
                   void api
                     .writeConsole(
                       new TextEncoder().encode(
-                        "\r\n[Operator] XMODEM download: choose download in the USB menu, then run rx -b outfile on the host.\r\n"
+                        "\r\n[Operator] XMODEM download: choose download in the USB menu, then run rx -b outfile on the host (Operator holds the PTY — use a second Bramble or stop Pico).\r\n"
                       )
                     )
                     .then(() => setMsg("XMODEM download hint sent to console"))
@@ -299,6 +302,10 @@ function App() {
                 XMODEM download hint
               </button>
             </div>
+            <p className="hint">
+              Upload: menu <strong>2</strong> → drive → type <strong>CONFIRM</strong> → wait for{" "}
+              <strong>C</strong> → click XMODEM upload and pick the .po/.hdv.
+            </p>
           </section>
 
           <section>

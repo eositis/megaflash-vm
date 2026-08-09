@@ -19,5 +19,6 @@ export const api = {
   netHelperDisable: () => invoke<string>("net_helper_disable"),
   xmodemUploadMessage: (path: string) =>
     invoke<string>("xmodem_upload_message", { path }),
+  xmodemUpload: (path: string) => invoke<string>("xmodem_upload", { path }),
   syncFirmware: () => invoke<string>("sync_firmware"),
 };

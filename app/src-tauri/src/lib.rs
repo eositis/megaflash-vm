@@ -1,6 +1,7 @@
 mod net_helper;
 mod session;
 mod settings;
+mod xmodem;
 
 use session::SessionState;
 use settings::{load_settings, save_settings, Settings};
@@ -166,6 +167,20 @@ async fn net_helper_disable() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn xmodem_upload(
+    app: AppHandle,
+    state: State<'_, Arc<SessionState>>,
+    path: String,
+) -> Result<String, String> {
+    let state = state_arc(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        session::xmodem_upload(app, &state, std::path::Path::new(&path)).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn xmodem_upload_message(path: String) -> Result<String, String> {
     Ok(session::xmodem_upload_hint(&path))
 }
@@ -216,6 +231,7 @@ pub fn run() {
             net_helper_install,
             net_helper_enable,
             net_helper_disable,
+            xmodem_upload,
             xmodem_upload_message,
             sync_firmware,
         ])

@@ -41,7 +41,7 @@ The app bundle lands under:
 |------|----------|
 | Pico | Pick UF2, 0–2 SPI flash chips, Start/Stop overlay Bramble with `-usb-console pty:…` |
 | Console | Embedded xterm.js; select/copy; paste; optional file log |
-| XMODEM | Buttons print host-side `sx`/`rx`/`tio` hints into the console (firmware menu still drives transfer) |
+| XMODEM | After menu Upload → CONFIRM → `C`, **XMODEM upload…** sends the file on the Operator PTY (do not also attach `sx`/`tio`) |
 | //c handoff | **Stop Pico & launch //c** stops USB Bramble and runs `scripts/run-megaflash-mame.sh` with ROM / color / scale / Wi‑Fi settings |
 | Network helper | One-time admin install → `/usr/local/libexec/megaflash-net-helper.sh` + sudoers NOPASSWD for pf NAT |
 | Concurrent windows | UI toggle present but **disabled** (future) |
@@ -49,6 +49,8 @@ The app bundle lands under:
 Bramble/MAME child stderr is written to `~/Library/Logs/MegaFlashOperator/` (`bramble-pico.stderr.log`, etc.). Do not pipe undrained stdio — UF2 loader output fills the pipe and blocks PTY creation.
 
 The Operator opens the USB PTY in **raw / no-echo** mode (like `tio`/`screen`). Default macOS termios ECHO would loop guest TX into RX and spam the console. xterm uses `convertEol` so bare LF from firmware starts a new line correctly.
+
+Banner/menu newlines require Bramble’s `__wrap_puts` host path to append `\n` (the compiler turns `printf("…\n")` into `puts`). Rebuild overlay `bramble` after pulling that fix.
 
 Settings persist in:
 
