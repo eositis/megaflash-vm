@@ -235,10 +235,18 @@ button.primary:hover:not(:disabled) {
 
 .console-host {
   flex: 1;
-  min-height: 280px;
+  min-height: 0;
+  overflow: hidden;
   padding: 0.35rem;
+  position: relative;
 }
 
 .console-host .xterm {
   height: 100%;
+  width: 100%;
+  padding: 0;
+}
+
+.console-host .xterm-viewport {
+  overflow-y: auto !important;
 }

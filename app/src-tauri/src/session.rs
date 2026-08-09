@@ -184,6 +184,48 @@ fn stderr_tail(path: &Path, max_bytes: usize) -> String {
     String::from_utf8_lossy(&data[start..]).trim().to_string()
 }
 
+/// Put the PTY slave in raw / no-echo mode.
+///
+/// Opening `/tmp/bramble-usb-console` with default termios leaves ECHO on.
+/// Guest TX is then echoed back into host RX → GetString eats its own output
+/// and reprints "Type CONFIRM…" forever (constant scroll).
+fn configure_pty_raw(file: &File) -> Result<()> {
+    use nix::sys::termios::{
+        cfmakeraw, tcgetattr, tcsetattr, InputFlags, LocalFlags, SetArg,
+    };
+    use std::os::fd::AsFd;
+    let mut termios = tcgetattr(file.as_fd()).context("tcgetattr PTY")?;
+    cfmakeraw(&mut termios);
+    termios.local_flags.remove(
+        LocalFlags::ECHO
+            | LocalFlags::ECHOE
+            | LocalFlags::ECHOK
+            | LocalFlags::ECHONL
+            | LocalFlags::ICANON
+            | LocalFlags::ISIG
+            | LocalFlags::IEXTEN,
+    );
+    termios.input_flags.remove(
+        InputFlags::IXON
+            | InputFlags::IXOFF
+            | InputFlags::ICRNL
+            | InputFlags::INLCR
+            | InputFlags::IGNCR,
+    );
+    tcsetattr(file.as_fd(), SetArg::TCSANOW, &termios).context("tcsetattr raw PTY")?;
+    Ok(())
+}
+
+fn open_pty_rw(path: &Path) -> Result<File> {
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open PTY {}", path.display()))?;
+    configure_pty_raw(&file)?;
+    Ok(file)
+}
+
 pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
     // Lock order: settings before procs (must match status()).
     let settings = state.get_settings_clone();
@@ -241,16 +283,8 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
         bail!("{e}\n--- bramble stderr (tail) ---\n{tail}");
     }
 
-    let reader = File::options()
-        .read(true)
-        .write(true)
-        .open(&pty)
-        .context("open PTY for read")?;
-    let writer = File::options()
-        .read(true)
-        .write(true)
-        .open(&pty)
-        .context("open PTY for write")?;
+    let reader = open_pty_rw(&pty).context("open PTY for read")?;
+    let writer = open_pty_rw(&pty).context("open PTY for write")?;
 
     let mut log_for_thread: Option<File> = None;
     {

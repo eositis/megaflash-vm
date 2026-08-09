@@ -48,6 +48,8 @@ The app bundle lands under:
 
 Bramble/MAME child stderr is written to `~/Library/Logs/MegaFlashOperator/` (`bramble-pico.stderr.log`, etc.). Do not pipe undrained stdio — UF2 loader output fills the pipe and blocks PTY creation.
 
+The Operator opens the USB PTY in **raw / no-echo** mode (like `tio`/`screen`). Default macOS termios ECHO would loop guest TX into RX and spam the console. xterm uses `convertEol` so bare LF from firmware starts a new line correctly.
+
 Settings persist in:
 
 `~/Library/Application Support/MegaFlashOperator/settings.json`

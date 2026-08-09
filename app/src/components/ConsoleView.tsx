@@ -13,13 +13,21 @@ export function ConsoleView({ active }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const activeRef = useRef(active);
+
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
 
   useEffect(() => {
     if (!hostRef.current || termRef.current) return;
     const term = new Terminal({
       cursorBlink: true,
+      // Firmware/Pico stdio often sends bare LF; without this, lines staircase.
+      convertEol: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
       fontSize: 13,
+      scrollback: 5000,
       theme: {
         background: "#0d1117",
         foreground: "#e6edf3",
@@ -31,18 +39,33 @@ export function ConsoleView({ active }: Props) {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(hostRef.current);
-    fit.fit();
+    requestAnimationFrame(() => fit.fit());
     termRef.current = term;
     fitRef.current = fit;
 
     term.onData((data) => {
-      if (!active) return;
+      if (!activeRef.current) return;
       const bytes = new TextEncoder().encode(data);
       void api.writeConsole(bytes).catch(() => {});
     });
 
-    const onResize = () => fit.fit();
-    window.addEventListener("resize", onResize);
+    let fitTimer: number | undefined;
+    const scheduleFit = () => {
+      window.clearTimeout(fitTimer);
+      fitTimer = window.setTimeout(() => {
+        try {
+          fit.fit();
+        } catch {
+          /* host may be hidden */
+        }
+      }, 50);
+    };
+    window.addEventListener("resize", scheduleFit);
+    const ro =
+      typeof ResizeObserver !== "undefined" && hostRef.current
+        ? new ResizeObserver(scheduleFit)
+        : null;
+    if (hostRef.current && ro) ro.observe(hostRef.current);
 
     let unlisten: (() => void) | undefined;
     void listen<number[]>("console-data", (ev) => {
@@ -53,15 +76,25 @@ export function ConsoleView({ active }: Props) {
     });
 
     return () => {
-      window.removeEventListener("resize", onResize);
+      window.removeEventListener("resize", scheduleFit);
+      window.clearTimeout(fitTimer);
+      ro?.disconnect();
       unlisten?.();
       term.dispose();
       termRef.current = null;
+      fitRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    fitRef.current?.fit();
+    const id = window.setTimeout(() => {
+      try {
+        fitRef.current?.fit();
+      } catch {
+        /* ignore */
+      }
+    }, 50);
+    return () => window.clearTimeout(id);
   }, [active]);
 
   return (
