@@ -20,12 +20,31 @@ function App() {
     setSettings(s);
     const st = await api.getSessionStatus();
     setStatus(st);
-    const n = await api.netHelperStatus();
-    setNet(n);
+    // Net helper after first paint; never block initial UI on sudo/helper.
+    try {
+      const n = await api.netHelperStatus();
+      setNet(n);
+    } catch {
+      /* ignore */
+    }
   };
 
   useEffect(() => {
-    void refresh().catch((e) => setError(String(e)));
+    void (async () => {
+      try {
+        const s = await api.getSettings();
+        setSettings(s);
+        const st = await api.getSessionStatus();
+        setStatus(st);
+      } catch (e) {
+        setError(String(e));
+      }
+      try {
+        setNet(await api.netHelperStatus());
+      } catch {
+        /* optional */
+      }
+    })();
     const u1 = listen<SessionStatus>("session-status", (ev) => setStatus(ev.payload));
     return () => {
       void u1.then((f) => f());

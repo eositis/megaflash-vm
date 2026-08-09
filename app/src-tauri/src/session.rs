@@ -52,12 +52,21 @@ impl SessionState {
     }
 
     pub fn status(&self) -> SessionStatus {
-        let pty_path = self
-            .settings
-            .lock()
-            .map(|s| s.usb_console_pty.clone())
-            .unwrap_or_else(|_| "/tmp/bramble-usb-console".into());
-        let procs = self.procs.lock().unwrap_or_else(|e| e.into_inner());
+        // Never block the UI/IPC thread: try_lock and report idle if busy.
+        let pty_path = match self.settings.try_lock() {
+            Ok(s) => s.usb_console_pty.clone(),
+            Err(_) => "/tmp/bramble-usb-console".into(),
+        };
+        let Ok(procs) = self.procs.try_lock() else {
+            return SessionStatus {
+                pico_running: false,
+                mame_running: false,
+                pico_pid: None,
+                mame_pid: None,
+                bramble_a2bus_pid: None,
+                pty_path,
+            };
+        };
         SessionStatus {
             pico_running: procs.pico.is_some(),
             mame_running: procs.mame.is_some(),
