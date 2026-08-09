@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -36,8 +36,8 @@ fn read_available(reader: &mut impl Read, buf: &mut Vec<u8>) -> Result<()> {
             buf.extend_from_slice(&tmp[..n]);
             Ok(())
         }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(()),
+        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
+        Err(e) if e.kind() == ErrorKind::Interrupted => Ok(()),
         Err(e) => Err(e.into()),
     }
 }
@@ -68,6 +68,35 @@ fn drain(reader: &mut impl Read, ms: u64) {
     while Instant::now() < deadline {
         let _ = read_available(reader, &mut buf);
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// PTY fds are O_NONBLOCK; write_all alone fails with WouldBlock on 1K frames.
+fn write_all_nb(writer: &mut impl Write, data: &[u8], timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut off = 0usize;
+    while off < data.len() {
+        if Instant::now() >= deadline {
+            bail!(
+                "PTY write stalled at {}/{} bytes (non-blocking buffer full)",
+                off,
+                data.len()
+            );
+        }
+        match writer.write(&data[off..]) {
+            Ok(0) => std::thread::sleep(Duration::from_millis(5)),
+            Ok(n) => off += n,
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e).context("PTY write"),
+        }
+    }
+    // Best-effort flush; ignore WouldBlock.
+    match writer.flush() {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
+        Err(e) => Err(e).context("PTY flush"),
     }
 }
 
@@ -108,8 +137,8 @@ pub fn send_file(reader: &mut impl Read, writer: &mut impl Write, path: &Path) -
         frame.push((csum >> 8) as u8);
         frame.push((csum & 0xff) as u8);
 
-        writer.write_all(&frame).context("write XMODEM frame")?;
-        writer.flush()?;
+        write_all_nb(writer, &frame, Duration::from_secs(30))
+            .with_context(|| format!("write XMODEM frame block {block}"))?;
 
         let ack = wait_for_byte(reader, &[ACK, NAK], Duration::from_secs(120))?;
         if ack != ACK {
@@ -121,8 +150,7 @@ pub fn send_file(reader: &mut impl Read, writer: &mut impl Write, path: &Path) -
         block = block.wrapping_add(1);
     }
 
-    writer.write_all(&[EOT]).context("write EOT")?;
-    writer.flush()?;
+    write_all_nb(writer, &[EOT], Duration::from_secs(10)).context("write EOT")?;
     let _ = wait_for_byte(reader, &[ACK, NAK], Duration::from_secs(30));
     Ok(sent)
 }
