@@ -276,9 +276,11 @@ function App() {
                       { name: "ProDOS image", extensions: ["po", "hdv", "bin", "img"] },
                     ]);
                     if (!p) return;
-                    const hint = await api.xmodemUploadMessage(p);
-                    await api.writeConsole(new TextEncoder().encode(hint));
-                    setMsg("Waiting for receiver C / sending XMODEM…");
+                    // Do NOT writeConsole() here — MegaFlash XMODEM start treats
+                    // every non-SOH/STX byte as an error and aborts after ~30.
+                    setMsg(
+                      "Sending XMODEM on the console PTY (menu must already show CCCC)…"
+                    );
                     const result = await api.xmodemUpload(p);
                     setMsg(result);
                   })
@@ -304,7 +306,8 @@ function App() {
             </div>
             <p className="hint">
               Upload: menu <strong>2</strong> → drive → type <strong>CONFIRM</strong> → wait for{" "}
-              <strong>C</strong> → click XMODEM upload and pick the .po/.hdv.
+              <strong>CCCC</strong> → click XMODEM upload and pick the .po/.hdv. Do not type in the
+              console while it is waiting for the transfer.
             </p>
           </section>
 

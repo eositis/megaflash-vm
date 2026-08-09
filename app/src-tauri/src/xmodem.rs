@@ -1,7 +1,7 @@
 //! Minimal XMODEM-CRC / 1K sender for the Operator PTY.
 
 use anyhow::{bail, Context, Result};
-use std::fs;
+use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -42,24 +42,47 @@ fn read_available(reader: &mut impl Read, buf: &mut Vec<u8>) -> Result<()> {
     }
 }
 
-fn wait_for_byte(
-    reader: &mut impl Read,
-    want: &[u8],
-    timeout: Duration,
-) -> Result<u8> {
+/// Wait for MegaFlash's CRC invite. Require a run of `C`s so we do not match
+/// the letter in "Ctrl-C" / "CONFIRM".
+fn wait_for_receiver_c(reader: &mut impl Read, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut buf = Vec::new();
+    let mut run = 0u32;
     while Instant::now() < deadline {
+        let before = buf.len();
         read_available(reader, &mut buf)?;
-        if let Some(pos) = buf.iter().position(|b| want.contains(b)) {
-            return Ok(buf[pos]);
+        for &b in &buf[before..] {
+            if b == CRC_C {
+                run += 1;
+                if run >= 3 {
+                    return Ok(());
+                }
+            } else {
+                run = 0;
+            }
         }
         if buf.len() > 65536 {
             buf.drain(..buf.len() - 4096);
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    bail!("timeout waiting for {:?}", want);
+    bail!("timeout waiting for receiver CCC — choose Upload → drive → CONFIRM first");
+}
+
+fn wait_for_ack_nak(reader: &mut impl Read, timeout: Duration) -> Result<u8> {
+    let deadline = Instant::now() + timeout;
+    let mut buf = Vec::new();
+    while Instant::now() < deadline {
+        read_available(reader, &mut buf)?;
+        if let Some(&b) = buf.iter().find(|&&b| b == ACK || b == NAK) {
+            return Ok(b);
+        }
+        if buf.len() > 65536 {
+            buf.drain(..buf.len() - 4096);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    bail!("timeout waiting for ACK/NAK");
 }
 
 fn drain(reader: &mut impl Read, ms: u64) {
@@ -92,7 +115,6 @@ fn write_all_nb(writer: &mut impl Write, data: &[u8], timeout: Duration) -> Resu
             Err(e) => return Err(e).context("PTY write"),
         }
     }
-    // Best-effort flush; ignore WouldBlock.
     match writer.flush() {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
@@ -100,57 +122,84 @@ fn write_all_nb(writer: &mut impl Write, data: &[u8], timeout: Duration) -> Resu
     }
 }
 
+fn send_block(
+    reader: &mut impl Read,
+    writer: &mut impl Write,
+    block: u8,
+    chunk: &[u8],
+) -> Result<()> {
+    let size = chunk.len();
+    let header = if size == 1024 { STX } else { SOH };
+    let csum = crc16_xmodem(chunk);
+    let mut frame = Vec::with_capacity(3 + size + 2);
+    frame.push(header);
+    frame.push(block);
+    frame.push(!block);
+    frame.extend_from_slice(chunk);
+    frame.push((csum >> 8) as u8);
+    frame.push((csum & 0xff) as u8);
+
+    let mut last_err = None;
+    for attempt in 1..=5 {
+        write_all_nb(writer, &frame, Duration::from_secs(30))
+            .with_context(|| format!("write XMODEM frame block {block} attempt {attempt}"))?;
+        match wait_for_ack_nak(reader, Duration::from_secs(45)) {
+            Ok(ACK) => return Ok(()),
+            Ok(NAK) => {
+                last_err = Some(anyhow::anyhow!("NAK on block {block} attempt {attempt}"));
+                drain(reader, 50);
+            }
+            Err(e) => {
+                last_err = Some(e);
+                drain(reader, 50);
+            }
+            Ok(other) => {
+                last_err = Some(anyhow::anyhow!(
+                    "unexpected response {other:#x} on block {block}"
+                ));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("XMODEM block {block} failed")))
+}
+
 /// Send `path` with XMODEM-CRC (128 or 1K blocks). Caller must own exclusive
 /// PTY read/write (console reader thread paused).
+///
+/// Important: do not write UI hints to the PTY while MegaFlash is in STATE_BEGIN —
+/// each non-SOH/STX byte increments its start-error counter and aborts (~30 chars).
 pub fn send_file(reader: &mut impl Read, writer: &mut impl Write, path: &Path) -> Result<usize> {
-    let payload = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-    if payload.is_empty() {
+    let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let file_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
+    if file_len == 0 {
         bail!("file is empty: {}", path.display());
     }
 
-    // Wait for receiver 'C' (CRC mode).
-    wait_for_byte(reader, &[CRC_C], Duration::from_secs(90))
-        .context("receiver never sent 'C' — choose Upload → drive → CONFIRM first")?;
-    drain(reader, 150);
+    wait_for_receiver_c(reader, Duration::from_secs(90))?;
+    drain(reader, 80);
 
     let mut block: u8 = 1;
-    let mut offset = 0usize;
     let mut sent = 0usize;
+    let mut offset = 0usize;
 
-    while offset < payload.len() {
-        let mut size = 1024usize;
-        let mut chunk = payload[offset..payload.len().min(offset + size)].to_vec();
-        if chunk.len() < size {
-            size = 128;
-            chunk = payload[offset..payload.len().min(offset + size)].to_vec();
-            if chunk.len() < size {
-                chunk.resize(size, 0x1a);
-            }
+    while offset < file_len {
+        let size = if file_len - offset >= 1024 { 1024 } else { 128 };
+        let mut chunk = vec![0u8; size];
+        let n = file.read(&mut chunk).context("read image")?;
+        if n == 0 {
+            break;
         }
-        let header = if size == 1024 { STX } else { SOH };
-        let csum = crc16_xmodem(&chunk);
-        let mut frame = Vec::with_capacity(3 + size + 2);
-        frame.push(header);
-        frame.push(block);
-        frame.push(!block);
-        frame.extend_from_slice(&chunk);
-        frame.push((csum >> 8) as u8);
-        frame.push((csum & 0xff) as u8);
-
-        write_all_nb(writer, &frame, Duration::from_secs(30))
-            .with_context(|| format!("write XMODEM frame block {block}"))?;
-
-        let ack = wait_for_byte(reader, &[ACK, NAK], Duration::from_secs(120))?;
-        if ack != ACK {
-            bail!("NAK/timeout on block {block}");
+        if n < size {
+            chunk[n..].fill(0x1a);
         }
 
-        offset += size;
+        send_block(reader, writer, block, &chunk)?;
         sent += size;
+        offset += size;
         block = block.wrapping_add(1);
     }
 
     write_all_nb(writer, &[EOT], Duration::from_secs(10)).context("write EOT")?;
-    let _ = wait_for_byte(reader, &[ACK, NAK], Duration::from_secs(30));
-    Ok(sent)
+    let _ = wait_for_ack_nak(reader, Duration::from_secs(30));
+    Ok(sent.min(file_len))
 }

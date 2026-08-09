@@ -531,9 +531,9 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
 
 pub fn xmodem_upload_hint(path: &str) -> String {
     format!(
-        "\r\n[Operator] XMODEM: in USB menu choose 2) Upload → drive → type CONFIRM.\r\n\
-When you see CCCCC, click “XMODEM upload…” and pick:\r\n  {path}\r\n\
-(Operator sends XMODEM on this PTY — do not also run sx/tio on the same port.)\r\n",
+        "\r\n[Operator] XMODEM: menu 2 → drive → CONFIRM → wait for CCCC, then click Upload.\r\n\
+File: {path}\r\n\
+(Do not type into the console during transfer; hints must not be written to the PTY.)\r\n",
         path = path
     )
 }
