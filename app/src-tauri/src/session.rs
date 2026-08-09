@@ -148,6 +148,42 @@ fn wait_for_pty(path: &Path, timeout: Duration) -> Result<()> {
     bail!("USB console PTY did not appear: {}", path.display())
 }
 
+fn operator_log_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Library/Logs/MegaFlashOperator")
+}
+
+/// Redirect child stdio to files. Piped + undrained stderr fills (~64KB) and
+/// stalls Bramble during UF2 load *before* the USB PTY symlink is created.
+fn stdio_to_log(stem: &str) -> Result<(Stdio, Stdio, PathBuf)> {
+    let dir = operator_log_dir();
+    std::fs::create_dir_all(&dir).context("create Operator log dir")?;
+    let stderr_path = dir.join(format!("{stem}.stderr.log"));
+    let stdout_path = dir.join(format!("{stem}.stdout.log"));
+    let stderr = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&stderr_path)
+        .with_context(|| format!("open {}", stderr_path.display()))?;
+    let stdout = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&stdout_path)
+        .with_context(|| format!("open {}", stdout_path.display()))?;
+    Ok((Stdio::from(stdout), Stdio::from(stderr), stderr_path))
+}
+
+fn stderr_tail(path: &Path, max_bytes: usize) -> String {
+    let Ok(data) = std::fs::read(path) else {
+        return String::new();
+    };
+    let start = data.len().saturating_sub(max_bytes);
+    String::from_utf8_lossy(&data[start..]).trim().to_string()
+}
+
 pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
     // Lock order: settings before procs (must match status()).
     let settings = state.get_settings_clone();
@@ -170,6 +206,8 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
     let pty = PathBuf::from(&settings.usb_console_pty);
     let _ = std::fs::remove_file(&pty);
 
+    let (stdout, stderr, stderr_path) = stdio_to_log("bramble-pico")?;
+
     let mut cmd = Command::new(&bramble);
     cmd.arg(&uf2)
         .arg("-arch")
@@ -185,8 +223,8 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
         .arg("7200")
         .current_dir(&root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
+        .stdout(stdout)
+        .stderr(stderr);
 
     let child = cmd.spawn().context("spawn bramble (pico console)")?;
     {
@@ -194,7 +232,14 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
         procs.pico = Some(child);
     }
 
-    wait_for_pty(&pty, Duration::from_secs(30))?;
+    if let Err(e) = wait_for_pty(&pty, Duration::from_secs(30)) {
+        let tail = stderr_tail(&stderr_path, 2000);
+        stop_pico(state);
+        if tail.is_empty() {
+            bail!("{e} (bramble log: {})", stderr_path.display());
+        }
+        bail!("{e}\n--- bramble stderr (tail) ---\n{tail}");
+    }
 
     let reader = File::options()
         .read(true)
@@ -318,6 +363,8 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
     let h = 384 * u32::from(scale) / 2;
     let resolution = format!("{w}x{h}");
 
+    let (stdout, stderr, _mame_stderr) = stdio_to_log("mame-stack")?;
+
     let mut cmd = Command::new("bash");
     cmd.arg(&script)
         .current_dir(&root)
@@ -326,8 +373,8 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
         .env("BRAMBLE_A2BUS_PORT", settings.a2bus_port.to_string())
         .env("MEGAFLASH_VM_ROOT", &settings.megaflash_vm_root)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(stdout)
+        .stderr(stderr);
 
     if settings.flash_chip_count >= 1 {
         cmd.env("SPI_FLASH1", &settings.spi_flash1_path);

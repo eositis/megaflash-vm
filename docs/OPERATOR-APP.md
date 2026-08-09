@@ -46,6 +46,8 @@ The app bundle lands under:
 | Network helper | One-time admin install → `/usr/local/libexec/megaflash-net-helper.sh` + sudoers NOPASSWD for pf NAT |
 | Concurrent windows | UI toggle present but **disabled** (future) |
 
+Bramble/MAME child stderr is written to `~/Library/Logs/MegaFlashOperator/` (`bramble-pico.stderr.log`, etc.). Do not pipe undrained stdio — UF2 loader output fills the pipe and blocks PTY creation.
+
 Settings persist in:
 
 `~/Library/Application Support/MegaFlashOperator/settings.json`
