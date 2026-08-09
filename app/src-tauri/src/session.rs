@@ -100,6 +100,26 @@ fn kill_opt(child: &mut Option<Child>) {
     }
 }
 
+/// Kill orphaned `bramble … -usb-console pty:<path>` processes left after an
+/// Operator crash/relaunch. Two masters fighting one symlink corrupt XMODEM.
+fn kill_stale_bramble_for_pty(pty: &Path) {
+    let needle = format!("pty:{}", pty.display());
+    let Ok(output) = Command::new("pgrep").arg("-lf").arg("bramble").output() else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !(line.contains("bramble") && line.contains(&needle)) {
+            continue;
+        }
+        let Some(pid_str) = line.split_whitespace().next() else {
+            continue;
+        };
+        let _ = Command::new("kill").arg("-TERM").arg(pid_str).status();
+        thread::sleep(Duration::from_millis(250));
+        let _ = Command::new("kill").arg("-KILL").arg(pid_str).status();
+    }
+}
+
 fn join_console_reader(state: &SessionState, timeout: Duration) -> Result<()> {
     state.stop_reader.store(true, Ordering::SeqCst);
     let handle = state
@@ -127,7 +147,8 @@ fn join_console_reader(state: &SessionState, timeout: Duration) -> Result<()> {
 }
 
 pub fn stop_pico(state: &SessionState) {
-    let _ = join_console_reader(state, Duration::from_millis(800));
+    join_console_reader(state, Duration::from_millis(800)).ok();
+    let pty = PathBuf::from(&state.get_settings_clone().usb_console_pty);
     {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
         procs.pty_writer = None;
@@ -143,6 +164,8 @@ pub fn stop_pico(state: &SessionState) {
     {
         let _ = h.join();
     }
+    kill_stale_bramble_for_pty(&pty);
+    let _ = std::fs::remove_file(&pty);
     state.stop_reader.store(false, Ordering::SeqCst);
 }
 
@@ -327,6 +350,8 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
     }
 
     let pty = PathBuf::from(&settings.usb_console_pty);
+    // Drop orphans from a previous Operator instance before opening a new master.
+    kill_stale_bramble_for_pty(&pty);
     let _ = std::fs::remove_file(&pty);
 
     let (stdout, stderr, stderr_path) = stdio_to_log("bramble-pico")?;

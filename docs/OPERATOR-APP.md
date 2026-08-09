@@ -41,7 +41,7 @@ The app bundle lands under:
 |------|----------|
 | Pico | Pick UF2, 0–2 SPI flash chips, Start/Stop overlay Bramble with `-usb-console pty:…` |
 | Console | Embedded xterm.js; select/copy; paste; optional file log |
-| XMODEM | After menu Upload → CONFIRM → `CCCC`, **XMODEM upload…** sends on the Operator PTY. Do not type in the console during wait or transfer. Operator joins the console reader, keeps the existing RDWR slave FD open (never close the last client — Bramble does not hold the slave), and uses blocking full-frame writes. |
+| XMODEM | After menu Upload → CONFIRM → `CCCC`, **XMODEM upload…** sends on the Operator PTY. Do not type in the console during wait or transfer. ACK wait is 300s (same as `test-32mb-xmodem.sh`); CAN aborts are reported. Pico start/stop kills orphaned `bramble` processes on the same PTY. |
 | //c handoff | **Stop Pico & launch //c** stops USB Bramble and runs `scripts/run-megaflash-mame.sh` with ROM / color / scale / Wi‑Fi settings |
 | Network helper | One-time admin install → `/usr/local/libexec/megaflash-net-helper.sh` + sudoers NOPASSWD for pf NAT |
 | Concurrent windows | UI toggle present but **disabled** (future) |

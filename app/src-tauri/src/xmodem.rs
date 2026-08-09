@@ -12,7 +12,12 @@ const STX: u8 = 0x02;
 const EOT: u8 = 0x04;
 const ACK: u8 = 0x06;
 const NAK: u8 = 0x15;
+const CAN: u8 = 0x18;
 const CRC_C: u8 = b'C';
+
+/// Match `scripts/test-xmodem-upload.py` / `test-32mb-xmodem.sh`. Emulated flash
+/// writes can stall MegaFlash well past a few tens of seconds per block.
+const ACK_TIMEOUT: Duration = Duration::from_secs(300);
 
 fn crc16_xmodem(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
@@ -70,13 +75,24 @@ fn wait_for_receiver_c(pty: &mut File, timeout: Duration) -> Result<()> {
     bail!("timeout waiting for receiver CCC — choose Upload → drive → CONFIRM first");
 }
 
-fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<u8> {
+enum RxCtrl {
+    Ack,
+    Nak,
+    Cancel,
+}
+
+fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<RxCtrl> {
     let deadline = Instant::now() + timeout;
     let mut buf = Vec::new();
     while Instant::now() < deadline {
         read_available(pty, &mut buf)?;
-        if let Some(pos) = buf.iter().position(|&b| b == ACK || b == NAK) {
-            return Ok(buf[pos]);
+        for &b in &buf {
+            match b {
+                ACK => return Ok(RxCtrl::Ack),
+                NAK => return Ok(RxCtrl::Nak),
+                CAN => return Ok(RxCtrl::Cancel),
+                _ => {}
+            }
         }
         if buf.len() > 65536 {
             buf.drain(..buf.len() - 4096);
@@ -147,27 +163,27 @@ fn send_block(pty: &mut File, block: u8, chunk: &[u8]) -> Result<()> {
     for attempt in 1..=5 {
         write_frame_blocking(pty, &frame)
             .with_context(|| format!("write XMODEM frame block {block} attempt {attempt}"))?;
-        match wait_for_ack_nak(pty, Duration::from_secs(45)) {
-            Ok(ACK) => {
-                // Brief settle so flash-side work does not race the next STX.
-                std::thread::sleep(Duration::from_millis(2));
+        match wait_for_ack_nak(pty, ACK_TIMEOUT) {
+            Ok(RxCtrl::Ack) => {
+                // Give PacketReceived / flash flush time before the next STX.
+                // MegaFlash ACKs before finishing the SPI write under emu.
+                std::thread::sleep(Duration::from_millis(15));
                 return Ok(());
             }
-            Ok(NAK) => {
+            Ok(RxCtrl::Nak) => {
                 last_err = Some(anyhow::anyhow!("NAK on block {block} attempt {attempt}"));
-                drain(pty, 200);
+                drain(pty, 250);
+            }
+            Ok(RxCtrl::Cancel) => {
+                bail!("receiver cancelled (CAN) on block {block} attempt {attempt}");
             }
             Err(e) => {
                 last_err = Some(e.context(format!(
                     "ACK/NAK wait failed on block {block} attempt {attempt}"
                 )));
-                drain(pty, 200);
-            }
-            Ok(other) => {
-                last_err = Some(anyhow::anyhow!(
-                    "unexpected response {other:#x} on block {block}"
-                ));
-                drain(pty, 200);
+                // Long drain: guest may still be in a flash write; avoid stacking
+                // retransmits on top of a late ACK.
+                drain(pty, 500);
             }
         }
     }
@@ -212,6 +228,6 @@ pub fn send_file(pty: &mut File, path: &Path) -> Result<usize> {
     }
 
     write_frame_blocking(pty, &[EOT]).context("write EOT")?;
-    let _ = wait_for_ack_nak(pty, Duration::from_secs(30));
+    let _ = wait_for_ack_nak(pty, Duration::from_secs(60));
     Ok(sent.min(file_len))
 }
