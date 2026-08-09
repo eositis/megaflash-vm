@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
@@ -35,6 +35,8 @@ pub struct SessionState {
     pub settings: Mutex<Settings>,
     procs: Mutex<ProcSlots>,
     stop_reader: Arc<AtomicBool>,
+    /// Console PTY reader thread; joined before XMODEM so it cannot steal ACKs.
+    reader_join: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl SessionState {
@@ -49,6 +51,7 @@ impl SessionState {
                 log_file: None,
             }),
             stop_reader: Arc::new(AtomicBool::new(false)),
+            reader_join: Mutex::new(None),
         }
     }
 
@@ -97,15 +100,49 @@ fn kill_opt(child: &mut Option<Child>) {
     }
 }
 
-pub fn stop_pico(state: &SessionState) {
+fn join_console_reader(state: &SessionState, timeout: Duration) -> Result<()> {
     state.stop_reader.store(true, Ordering::SeqCst);
+    let handle = state
+        .reader_join
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    if let Some(h) = handle {
+        let start = Instant::now();
+        while !h.is_finished() {
+            if start.elapsed() >= timeout {
+                // Put handle back so a later stop can still join; do not detach
+                // while the thread may still read the PTY.
+                *state
+                    .reader_join
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(h);
+                bail!("console reader did not stop in time (still holding PTY RX)");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = h.join();
+    }
+    Ok(())
+}
+
+pub fn stop_pico(state: &SessionState) {
+    let _ = join_console_reader(state, Duration::from_millis(800));
     {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
         procs.pty_writer = None;
         procs.log_file = None;
         kill_opt(&mut procs.pico);
     }
-    thread::sleep(Duration::from_millis(100));
+    // If join timed out, drop any leftover handle after killing the child.
+    if let Some(h) = state
+        .reader_join
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
+        let _ = h.join();
+    }
     state.stop_reader.store(false, Ordering::SeqCst);
 }
 
@@ -243,7 +280,7 @@ fn spawn_console_reader(
 ) {
     let stop = state.stop_reader.clone();
     let app2 = app;
-    thread::spawn(move || {
+    let handle = thread::spawn(move || {
         let mut buf = [0u8; 4096];
         while !stop.load(Ordering::SeqCst) {
             match reader.read(&mut buf) {
@@ -264,6 +301,10 @@ fn spawn_console_reader(
             }
         }
     });
+    *state
+        .reader_join
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(handle);
 }
 
 pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
@@ -390,18 +431,17 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
         }
     }
 
-    // Pause console reader so we exclusively own PTY RX for ACKs.
-    state.stop_reader.store(true, Ordering::SeqCst);
-    thread::sleep(Duration::from_millis(150));
+    // Join the console reader fully before transfer. A lingering reader that
+    // only saw stop_reader after emit can steal ACKs → host resends → guest NAK.
+    join_console_reader(state, Duration::from_secs(2))?;
 
-    let mut writer = {
+    // One RDWR FD for the whole transfer (matches working Python dual-path).
+    // Re-open after joining so we do not share RX with a half-dead reader fd.
+    let mut pty = {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
-        procs
-            .pty_writer
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("console not connected"))?
+        procs.pty_writer = None;
+        open_pty_rw(&pty_path).context("open PTY for XMODEM")?
     };
-    let mut reader = open_pty_rw(&pty_path).context("open PTY for XMODEM read")?;
 
     let note = format!(
         "\r\n[Operator] XMODEM sending {} …\r\n",
@@ -409,12 +449,13 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
     );
     let _ = app.emit("console-data", note.as_bytes().to_vec());
 
-    let result = xmodem::send_file(&mut reader, &mut writer, path);
+    let result = xmodem::send_file(&mut pty, path);
 
-    // Restore writer + reader thread.
+    // Restore writer + reader thread (split again for console UX).
+    let reader = open_pty_rw(&pty_path).context("re-open PTY for console read")?;
     {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
-        procs.pty_writer = Some(writer);
+        procs.pty_writer = Some(pty);
     }
     state.stop_reader.store(false, Ordering::SeqCst);
     let log = if settings.console_log_enabled {
