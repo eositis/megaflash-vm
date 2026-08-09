@@ -83,7 +83,20 @@ fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<u8> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    bail!("timeout waiting for ACK/NAK");
+    let preview: String = buf
+        .iter()
+        .rev()
+        .take(32)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if preview.is_empty() {
+        bail!("timeout waiting for ACK/NAK (no RX)");
+    }
+    bail!("timeout waiting for ACK/NAK (last RX: {preview})")
 }
 
 fn drain(pty: &mut File, ms: u64) {
@@ -145,7 +158,9 @@ fn send_block(pty: &mut File, block: u8, chunk: &[u8]) -> Result<()> {
                 drain(pty, 200);
             }
             Err(e) => {
-                last_err = Some(e);
+                last_err = Some(e.context(format!(
+                    "ACK/NAK wait failed on block {block} attempt {attempt}"
+                )));
                 drain(pty, 200);
             }
             Ok(other) => {

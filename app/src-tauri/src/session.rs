@@ -435,12 +435,15 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
     // only saw stop_reader after emit can steal ACKs → host resends → guest NAK.
     join_console_reader(state, Duration::from_secs(2))?;
 
-    // One RDWR FD for the whole transfer (matches working Python dual-path).
-    // Re-open after joining so we do not share RX with a half-dead reader fd.
+    // Keep the existing RDWR slave FD open for the whole transfer. Bramble closes
+    // its openpty() slave after setup, so Operator is the only client — dropping
+    // every slave FD (close + reopen) makes master TX of ACK fail / vanish.
     let mut pty = {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
-        procs.pty_writer = None;
-        open_pty_rw(&pty_path).context("open PTY for XMODEM")?
+        procs
+            .pty_writer
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("console not connected"))?
     };
 
     let note = format!(
@@ -451,7 +454,7 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
 
     let result = xmodem::send_file(&mut pty, path);
 
-    // Restore writer + reader thread (split again for console UX).
+    // Re-open a second FD for the console reader while holding `pty` open.
     let reader = open_pty_rw(&pty_path).context("re-open PTY for console read")?;
     {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
