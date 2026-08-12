@@ -84,14 +84,23 @@ enum RxCtrl {
 fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<RxCtrl> {
     let deadline = Instant::now() + timeout;
     let mut buf = Vec::new();
+    // Modern XMODEM requires consecutive CANs — a lone 0x18 is often noise and
+    // aborting on it leaves MegaFlash mid-transfer while Operator stops sending.
+    let mut can_run = 0u32;
     while Instant::now() < deadline {
+        let before = buf.len();
         read_available(pty, &mut buf)?;
-        for &b in &buf {
+        for &b in &buf[before..] {
             match b {
                 ACK => return Ok(RxCtrl::Ack),
                 NAK => return Ok(RxCtrl::Nak),
-                CAN => return Ok(RxCtrl::Cancel),
-                _ => {}
+                CAN => {
+                    can_run += 1;
+                    if can_run >= 2 {
+                        return Ok(RxCtrl::Cancel);
+                    }
+                }
+                _ => can_run = 0,
             }
         }
         if buf.len() > 65536 {
@@ -115,7 +124,7 @@ fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<RxCtrl> {
     bail!("timeout waiting for ACK/NAK (last RX: {preview})")
 }
 
-fn drain(pty: &mut File, ms: u64) {
+pub fn drain(pty: &mut File, ms: u64) {
     let deadline = Instant::now() + Duration::from_millis(ms);
     let mut buf = Vec::new();
     while Instant::now() < deadline {
@@ -165,9 +174,8 @@ fn send_block(pty: &mut File, block: u8, chunk: &[u8]) -> Result<()> {
             .with_context(|| format!("write XMODEM frame block {block} attempt {attempt}"))?;
         match wait_for_ack_nak(pty, ACK_TIMEOUT) {
             Ok(RxCtrl::Ack) => {
-                // Give PacketReceived / flash flush time before the next STX.
                 // MegaFlash ACKs before finishing the SPI write under emu.
-                std::thread::sleep(Duration::from_millis(15));
+                std::thread::sleep(Duration::from_millis(50));
                 return Ok(());
             }
             Ok(RxCtrl::Nak) => {
@@ -175,14 +183,12 @@ fn send_block(pty: &mut File, block: u8, chunk: &[u8]) -> Result<()> {
                 drain(pty, 250);
             }
             Ok(RxCtrl::Cancel) => {
-                bail!("receiver cancelled (CAN) on block {block} attempt {attempt}");
+                bail!("receiver cancelled (CAN×2) on block {block} attempt {attempt}");
             }
             Err(e) => {
                 last_err = Some(e.context(format!(
                     "ACK/NAK wait failed on block {block} attempt {attempt}"
                 )));
-                // Long drain: guest may still be in a flash write; avoid stacking
-                // retransmits on top of a late ACK.
                 drain(pty, 500);
             }
         }

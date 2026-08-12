@@ -37,6 +37,9 @@ pub struct SessionState {
     stop_reader: Arc<AtomicBool>,
     /// Console PTY reader thread; joined before XMODEM so it cannot steal ACKs.
     reader_join: Mutex<Option<JoinHandle<()>>>,
+    /// While set, ignore console keystrokes (xterm onData) so they cannot
+    /// poison MegaFlash mid-transfer or mid-menu-recovery.
+    xmodem_busy: AtomicBool,
 }
 
 impl SessionState {
@@ -52,6 +55,7 @@ impl SessionState {
             }),
             stop_reader: Arc::new(AtomicBool::new(false)),
             reader_join: Mutex::new(None),
+            xmodem_busy: AtomicBool::new(false),
         }
     }
 
@@ -459,16 +463,20 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
     // Join the console reader fully before transfer. A lingering reader that
     // only saw stop_reader after emit can steal ACKs → host resends → guest NAK.
     join_console_reader(state, Duration::from_secs(2))?;
+    state.xmodem_busy.store(true, Ordering::SeqCst);
 
     // Keep the existing RDWR slave FD open for the whole transfer. Bramble closes
     // its openpty() slave after setup, so Operator is the only client — dropping
     // every slave FD (close + reopen) makes master TX of ACK fail / vanish.
     let mut pty = {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
-        procs
-            .pty_writer
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("console not connected"))?
+        match procs.pty_writer.take() {
+            Some(p) => p,
+            None => {
+                state.xmodem_busy.store(false, Ordering::SeqCst);
+                bail!("console not connected");
+            }
+        }
     };
 
     let note = format!(
@@ -479,12 +487,28 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
 
     let result = xmodem::send_file(&mut pty, path);
 
+    // Swallow post-abort banner bursts and any leftover binary so the restored
+    // console reader does not dump a menu storm / re-feed keystrokes.
+    xmodem::drain(&mut pty, 400);
+    let _ = configure_pty_raw(&pty);
+
     // Re-open a second FD for the console reader while holding `pty` open.
-    let reader = open_pty_rw(&pty_path).context("re-open PTY for console read")?;
+    let reader = match open_pty_rw(&pty_path) {
+        Ok(r) => r,
+        Err(e) => {
+            {
+                let mut procs = state.procs.lock().unwrap_or_else(|err| err.into_inner());
+                procs.pty_writer = Some(pty);
+            }
+            state.xmodem_busy.store(false, Ordering::SeqCst);
+            return Err(e).context("re-open PTY for console read");
+        }
+    };
     {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
         procs.pty_writer = Some(pty);
     }
+    state.xmodem_busy.store(false, Ordering::SeqCst);
     state.stop_reader.store(false, Ordering::SeqCst);
     let log = if settings.console_log_enabled {
         OpenOptions::new()
@@ -512,6 +536,9 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
 }
 
 pub fn write_console(state: &SessionState, data: &[u8]) -> Result<()> {
+    if state.xmodem_busy.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     let settings = state.get_settings_clone();
     let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
     let Some(w) = procs.pty_writer.as_mut() else {
