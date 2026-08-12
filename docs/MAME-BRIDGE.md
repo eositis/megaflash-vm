@@ -100,7 +100,8 @@ Bring-up notes (a2bus):
 | `MAME_ROMPATH` | `./roms` (staged) | Must **not** include Ample if you want MegaFlash maincpu |
 | `AMPLE_ROMS` | `~/Library/Application Support/Ample/roms` | Source for CHR/keyboard/speech staging only |
 | `BRAMBLE_IIC_BIN` | set by launcher to `IIC_BIN` | Optional Lua re-overlay path |
-| `MAME` | `mame` | Emulator binary |
+| `MAME_EXTRA_ARGS` | unset | Extra MAME flags (Operator: `-nomaximize -resolution WxH`) |
+| `MEGAFLASH_A2_MONITOR` | `color` | Apple II Monitor type: `color`, `bw` (B&W=4), `green`, `amber`. Written into `scripts/mame_cfg/apple2c4.cfg` and applied by the Lua plugin. |
 | `TIMEOUT` | unset (none) | Bramble `-timeout` seconds |
 | `NO_WIFI` | unset | `1` = do not pass `-wifi` |
 | `NO_HOST_NET` | unset | `1` = `-wifi` without `-tap` / pf |

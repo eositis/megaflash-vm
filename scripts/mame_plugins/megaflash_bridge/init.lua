@@ -9,7 +9,7 @@
 
 	local exports = {
 	name = "megaflash_bridge",
-	version = "0.1.6",
+	version = "0.1.7",
 	description = "Bramble MegaFlash $C0C0-$C0C3 TCP bridge",
 	license = "BSD-3-Clause",
 	author = { name = "eositis" }
@@ -137,6 +137,45 @@ function plugin.startplugin()
 		return addr & 0x3, addr
 	end
 
+	local function apply_video_prefs()
+		local mode = os.getenv("MEGAFLASH_A2_MONITOR")
+		if not mode or mode == "" or mode == "color" then
+			return
+		end
+		local ports = manager.machine.ioport.ports
+		local port = ports[":a2video:a2_video_config"]
+		if not port then
+			emu.print_error("megaflash_bridge: missing :a2video:a2_video_config")
+			return
+		end
+		local field = port.fields["Monitor type"]
+		if not field then
+			emu.print_error("megaflash_bridge: missing Monitor type field")
+			return
+		end
+		-- listxml: Color=0, B&W=4, Green=5, Amber=6
+		local v = 0
+		local m = string.lower(mode)
+		if m == "bw" or m == "mono" or m == "b&w" or m == "b/w" then
+			v = 4
+		elseif m == "green" then
+			v = 5
+		elseif m == "amber" then
+			v = 6
+		else
+			return
+		end
+		local ok = pcall(function()
+			field.user_value = v
+		end)
+		if not ok then
+			pcall(function()
+				field:set_value(v)
+			end)
+		end
+		logf("Monitor type=%s (value %d)", mode, v)
+	end
+
 	local function install_taps()
 		local cpu = manager.machine.devices[":maincpu"]
 		if not cpu then
@@ -146,9 +185,6 @@ function plugin.startplugin()
 		if not space then
 			return false
 		end
-
-		load_iic_rom()
-		ensure_sock()
 
 		if taps.read then
 			taps.read:remove()
@@ -227,6 +263,7 @@ function plugin.startplugin()
 			end)
 
 		taps_ready = true
+		apply_video_prefs()
 		logf("taps installed sock=%s", sock and "up" or "down (will retry)")
 		return true
 	end

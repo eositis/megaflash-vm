@@ -380,10 +380,28 @@ export BRAMBLE_IIC_BIN="$IIC_BIN"
 echo "[mame] launching apple2c4 (rompath=$ROMPATH; MegaFlash maincpu staged)"
 echo "[mame] expect WRONG CHECKSUM warning for 3410445b.256 — MegaFlash ROM, not stock"
 echo "[mame] pluginspath=$PLUGINPATH"
+export MEGAFLASH_A2_MONITOR="${MEGAFLASH_A2_MONITOR:-color}"
+CFG="$ROOT/scripts/mame_cfg/apple2c4.cfg"
+"$PYTHON3" - "$CFG" "$MEGAFLASH_A2_MONITOR" <<'PY'
+import re, sys
+path, mode = sys.argv[1], sys.argv[2].lower()
+val = {"bw": "4", "mono": "4", "b&w": "4", "b/w": "4", "green": "5", "amber": "6"}.get(mode, "0")
+port = f'<port tag=":a2video:a2_video_config" type="CONFIG" mask="7" defvalue="0" value="{val}" />'
+text = open(path, encoding="utf-8").read()
+pat = re.compile(r'<port tag=":a2video:a2_video_config"[^/]*/>')
+if pat.search(text):
+    text = pat.sub(port, text, count=1)
+else:
+    text = text.replace("</input>", f"            {port}\n        </input>", 1)
+open(path, "w", encoding="utf-8").write(text)
+print(f"[mame] apple2c4.cfg Monitor type value={val} ({mode})")
+PY
+
+echo "[mame] extras=${MAME_EXTRA_ARGS:-} monitor=${MEGAFLASH_A2_MONITOR}"
 # Do not exec: the EXIT trap must kill Bramble when MAME exits.
 set +e
 # scripts/mame_cfg: Open-Apple = Left Option or Left ⌘ (physical left solid-apple).
-# Optional extras from MegaFlash Operator (resolution / B&W tweaks).
+# Optional extras from MegaFlash Operator (window size). Color/B&W is Monitor type in cfg + Lua.
 # shellcheck disable=SC2206
 MAME_EXTRA=( ${MAME_EXTRA_ARGS:-} )
 "$MAME_BIN" apple2c4 \

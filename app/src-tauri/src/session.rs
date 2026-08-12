@@ -671,8 +671,9 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
     }
 
     let scale = settings.screen_scale.max(1);
-    let w = 560 * u32::from(scale) / 2;
-    let h = 384 * u32::from(scale) / 2;
+    // apple2c4 raster is 560×192; MAME keepaspect makes that ~560×384 at 1×.
+    let w = 560 * u32::from(scale);
+    let h = 384 * u32::from(scale);
     let resolution = format!("{w}x{h}");
 
     let (stdout, stderr, mame_stderr) = stdio_to_log("mame-stack")?;
@@ -688,6 +689,7 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
         .env("IIC_BIN", &settings.iic_rom_path)
         .env("BRAMBLE_A2BUS_PORT", settings.a2bus_port.to_string())
         .env("MEGAFLASH_VM_ROOT", &settings.megaflash_vm_root)
+        .env("MEGAFLASH_A2_MONITOR", &settings.color_mode)
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr);
@@ -705,15 +707,11 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
         cmd.env("NO_WIFI", "1");
     }
 
-    let mut extra = vec!["-resolution".to_string(), resolution];
-    if settings.color_mode == "bw" || settings.color_mode == "mono" {
-        extra.push("-effect".into());
-        extra.push("none".into());
-        extra.push("-brightness".into());
-        extra.push("0.85".into());
-        extra.push("-contrast".into());
-        extra.push("1.2".into());
-    }
+    let extra = vec![
+        "-nomaximize".to_string(),
+        "-resolution".into(),
+        resolution,
+    ];
     cmd.env("MAME_EXTRA_ARGS", extra.join(" "));
 
     let child = cmd.spawn().context("spawn run-megaflash-mame.sh")?;
