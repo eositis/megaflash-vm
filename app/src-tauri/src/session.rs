@@ -461,12 +461,21 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
 /// Prerequisite: in the USB menu choose Upload → drive → type CONFIRM, then
 /// wait until the console shows `C` characters. External `sx`/`tio` cannot share
 /// this PTY while Operator holds it.
+///
+/// Implementation: keep one slave FD open (avoid master HUP), stop the console
+/// reader, then run the known-good `scripts/test-xmodem-upload.py` in
+/// `XMODEM_SEND_ONLY` mode on a second open of the same PTY.
 pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> Result<String> {
     if !path.is_file() {
         bail!("file not found: {}", path.display());
     }
     let settings = state.get_settings_clone();
     let pty_path = PathBuf::from(&settings.usb_console_pty);
+    let root = PathBuf::from(&settings.megaflash_vm_root);
+    let script = root.join("scripts/test-xmodem-upload.py");
+    if !script.is_file() {
+        bail!("missing XMODEM helper: {}", script.display());
+    }
 
     {
         let procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
@@ -475,15 +484,12 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
         }
     }
 
-    // Join the console reader fully before transfer. A lingering reader that
-    // only saw stop_reader after emit can steal ACKs → host resends → guest NAK.
     join_console_reader(state, Duration::from_secs(2))?;
     state.xmodem_busy.store(true, Ordering::SeqCst);
 
-    // Keep the existing RDWR slave FD open for the whole transfer. Bramble closes
-    // its openpty() slave after setup, so Operator is the only client — dropping
-    // every slave FD (close + reopen) makes master TX of ACK fail / vanish.
-    let mut pty = {
+    // Hold the existing slave FD open for the whole transfer so Bramble's PTY
+    // master never sees last-client-close while Python opens a second FD.
+    let hold = {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
         match procs.pty_writer.take() {
             Some(p) => p,
@@ -500,41 +506,73 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
     );
     let _ = app.emit("console-data", note.as_bytes().to_vec());
 
-    let result = xmodem::send_file(&mut pty, path);
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(path)
+        .env("USB_CONSOLE_PTY_PATH", &pty_path)
+        .env("XMODEM_SEND_ONLY", "1")
+        .env("XMODEM_ACK_TIMEOUT", "300")
+        .current_dir(&root)
+        .output()
+        .context("spawn python3 XMODEM helper")?;
 
-    // Swallow post-abort banner bursts and any leftover binary so the restored
-    // console reader does not dump a menu storm / re-feed keystrokes.
-    xmodem::drain(&mut pty, 400);
-    let _ = configure_pty_raw(&pty);
-
-    // Re-open a second FD for the console reader while holding `pty` open.
-    let reader = match open_pty_rw(&pty_path) {
-        Ok(r) => r,
-        Err(e) => {
-            {
-                let mut procs = state.procs.lock().unwrap_or_else(|err| err.into_inner());
-                procs.pty_writer = Some(pty);
-            }
-            state.xmodem_busy.store(false, Ordering::SeqCst);
-            return Err(e).context("re-open PTY for console read");
-        }
-    };
-    {
-        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
-        procs.pty_writer = Some(pty);
-    }
-    state.xmodem_busy.store(false, Ordering::SeqCst);
-    state.stop_reader.store(false, Ordering::SeqCst);
-    let log = if settings.console_log_enabled {
-        OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&settings.console_log_path)
-            .ok()
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result = if output.status.success() {
+        let sent = stdout
+            .lines()
+            .rev()
+            .find_map(|l| {
+                l.strip_prefix("Done (")
+                    .and_then(|r| r.strip_suffix(" bytes sent)"))
+                    .and_then(|n| n.parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        Ok(sent)
     } else {
-        None
+        let detail = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            format!("python3 exited {}", output.status)
+        };
+        Err(anyhow::anyhow!("{detail}"))
     };
-    spawn_console_reader(app.clone(), state, reader, log);
+
+    // Drop any post-transfer chatter before restoring the console reader.
+    {
+        let mut hold = hold;
+        xmodem::drain(&mut hold, 300);
+        let _ = configure_pty_raw(&hold);
+        let reader = match open_pty_rw(&pty_path) {
+            Ok(r) => r,
+            Err(e) => {
+                {
+                    let mut procs = state.procs.lock().unwrap_or_else(|err| err.into_inner());
+                    procs.pty_writer = Some(hold);
+                }
+                state.xmodem_busy.store(false, Ordering::SeqCst);
+                return Err(e).context("re-open PTY for console read");
+            }
+        };
+        {
+            let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+            procs.pty_writer = Some(hold);
+        }
+        state.xmodem_busy.store(false, Ordering::SeqCst);
+        state.stop_reader.store(false, Ordering::SeqCst);
+        let log = if settings.console_log_enabled {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&settings.console_log_path)
+                .ok()
+        } else {
+            None
+        };
+        spawn_console_reader(app.clone(), state, reader, log);
+    }
 
     match result {
         Ok(n) => {

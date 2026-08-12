@@ -41,7 +41,7 @@ The app bundle lands under:
 |------|----------|
 | Pico | Pick UF2, 0–2 SPI flash chips, Start/Stop overlay Bramble with `-usb-console pty:…` |
 | Console | Embedded xterm.js; select/copy; paste; optional file log |
-| XMODEM | After menu Upload → CONFIRM → `CCCC`, **XMODEM upload…** sends on the Operator PTY (same algorithm as `scripts/test-xmodem-upload.py`: non-blocking frame writes, ACK/NAK only). Do not type in the console while waiting or transferring. |
+| XMODEM | After menu Upload → CONFIRM → `CCCC`, **XMODEM upload…** runs the known-good `scripts/test-xmodem-upload.py` (`XMODEM_SEND_ONLY`) while Operator keeps a PTY slave FD open. Requires `python3` on PATH. Do not type in the console during wait/transfer. |
 | //c handoff | **Stop Pico & launch //c** stops USB Bramble and runs `scripts/run-megaflash-mame.sh` with ROM / color / scale / Wi‑Fi settings |
 | Network helper | One-time admin install → `/usr/local/libexec/megaflash-net-helper.sh` + sudoers NOPASSWD for pf NAT |
 | Concurrent windows | UI toggle present but **disabled** (future) |

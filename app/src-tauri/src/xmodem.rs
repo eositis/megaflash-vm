@@ -7,6 +7,7 @@
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
+use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,6 @@ const ACK: u8 = 0x06;
 const NAK: u8 = 0x15;
 const CRC_C: u8 = b'C';
 
-/// Same default as `test-xmodem-upload.py` / `test-32mb-xmodem.sh` (300 there).
 const ACK_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn crc16_xmodem(data: &[u8]) -> u16 {
@@ -74,19 +74,19 @@ fn wait_for_receiver_c(pty: &mut File, timeout: Duration) -> Result<()> {
     bail!("timeout waiting for receiver CCC — choose Upload → drive → CONFIRM first");
 }
 
-/// Match Python `read_ack`: only ACK/NAK. Ignore CAN and other noise.
+/// Match Python `read_ack`: only ACK/NAK.
 fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<u8> {
     let deadline = Instant::now() + timeout;
-    let mut buf = Vec::new();
     while Instant::now() < deadline {
+        let mut buf = Vec::new();
         read_available(pty, &mut buf)?;
         for &b in &buf {
             if b == ACK || b == NAK {
                 return Ok(b);
             }
         }
-        buf.clear();
-        std::thread::sleep(Duration::from_millis(10));
+        // Poll like Python's select(timeout=0.5) rather than a busy 10ms spin.
+        std::thread::sleep(Duration::from_millis(20));
     }
     bail!("timeout waiting for ACK/NAK (no ACK/NAK seen)");
 }
@@ -100,7 +100,18 @@ pub fn drain(pty: &mut File, ms: u64) {
     }
 }
 
-/// Non-blocking write with retry — same strategy as the Python test driver.
+fn poll_out(pty: &File, timeout: Duration) -> Result<bool> {
+    use nix::poll::{poll, PollFd, PollFlags};
+    let mut pfd = [PollFd::new(pty.as_fd(), PollFlags::POLLOUT)];
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    match poll(&mut pfd, ms as u16) {
+        Ok(n) => Ok(n > 0),
+        Err(nix::errno::Errno::EINTR) => Ok(false),
+        Err(e) => Err(e).context("poll POLLOUT"),
+    }
+}
+
+/// Non-blocking write with POLLOUT wait — same idea as Python `select` on write.
 fn write_all_nb(pty: &mut File, data: &[u8], timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut off = 0usize;
@@ -113,10 +124,14 @@ fn write_all_nb(pty: &mut File, data: &[u8], timeout: Duration) -> Result<()> {
             );
         }
         match pty.write(&data[off..]) {
-            Ok(0) => std::thread::sleep(Duration::from_millis(5)),
+            Ok(0) => {
+                let _ = poll_out(pty, Duration::from_millis(500))?;
+            }
             Ok(n) => off += n,
             Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
-                std::thread::sleep(Duration::from_millis(5));
+                if !poll_out(pty, Duration::from_millis(500))? {
+                    continue;
+                }
             }
             Err(e) => return Err(e).context("PTY write"),
         }
@@ -140,33 +155,15 @@ fn send_block(pty: &mut File, block: u8, chunk: &[u8]) -> Result<()> {
     frame.push((csum >> 8) as u8);
     frame.push((csum & 0xff) as u8);
 
-    // Python test driver: one shot, no retries. Keep a few retries for emu
-    // flakiness but do not retransmit for minutes after a dead receiver.
-    let mut last_err = None;
-    for attempt in 1..=3 {
-        write_all_nb(pty, &frame, Duration::from_secs(30))
-            .with_context(|| format!("write XMODEM frame block {block} attempt {attempt}"))?;
-        match wait_for_ack_nak(pty, ACK_TIMEOUT) {
-            Ok(ACK) => return Ok(()),
-            Ok(NAK) => {
-                last_err = Some(anyhow::anyhow!("NAK on block {block} attempt {attempt}"));
-                drain(pty, 100);
-            }
-            Ok(other) => {
-                last_err = Some(anyhow::anyhow!(
-                    "unexpected response {other:#x} on block {block}"
-                ));
-                drain(pty, 100);
-            }
-            Err(e) => {
-                last_err = Some(e.context(format!(
-                    "ACK/NAK wait failed on block {block} attempt {attempt}"
-                )));
-                drain(pty, 100);
-            }
-        }
+    // One-shot like the Python driver. A single NAK after host-RX clear on the
+    // Bramble side is enough signal to stop rather than stack retransmits.
+    write_all_nb(pty, &frame, Duration::from_secs(30))
+        .with_context(|| format!("write XMODEM frame block {block}"))?;
+    match wait_for_ack_nak(pty, ACK_TIMEOUT)? {
+        ACK => Ok(()),
+        NAK => bail!("NAK on block {block}"),
+        other => bail!("unexpected response {other:#x} on block {block}"),
     }
-    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("XMODEM block {block} failed")))
 }
 
 /// Send `path` with XMODEM-CRC (128 or 1K blocks) on one RDWR PTY fd.
@@ -185,7 +182,6 @@ pub fn send_file(pty: &mut File, path: &Path) -> Result<usize> {
     let mut offset = 0usize;
 
     while offset < file_len {
-        // Prefer 1K while enough data remains; final short tail uses 128.
         let size = if file_len - offset >= 1024 { 1024 } else { 128 };
         let mut chunk = vec![0u8; size];
         let n = file.read(&mut chunk).context("read image")?;

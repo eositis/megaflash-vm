@@ -158,8 +158,18 @@ def main() -> int:
         print(f"PTY not found: {PTY}", file=sys.stderr)
         return 1
 
+    send_only = os.environ.get("XMODEM_SEND_ONLY", "").strip() in ("1", "true", "yes")
+    verify = os.environ.get("XMODEM_VERIFY", "").strip() in ("1", "true", "yes")
+
     pty = Pty(PTY)
     try:
+        if send_only:
+            # Operator (or another client) already drove the menu to CCCC and is
+            # holding a slave FD open so the PTY master does not hang up.
+            sent = send_xmodem_crc(pty, IMAGE, MAX_BYTES)
+            print(f"Done ({sent} bytes sent)", flush=True)
+            return 0
+
         time.sleep(0.5)
         pty.read_until(b"Please Select:", timeout=60.0)
         pty.write(b"2")
@@ -172,9 +182,9 @@ def main() -> int:
         tail = pty.read_until(b"blocks received", timeout=7200.0)
         print(tail.decode("utf-8", errors="replace"), flush=True)
         print(f"Done ({sent} bytes sent)", flush=True)
-        if MAX_BYTES <= 0:
-            expected = os.path.getsize(IMAGE)
-            with open(f"flash/spi-flash1.bin", "rb") as f:
+        if MAX_BYTES <= 0 or verify:
+            expected = os.path.getsize(IMAGE) if MAX_BYTES <= 0 else MAX_BYTES
+            with open("flash/spi-flash1.bin", "rb") as f:
                 got = f.read(expected)
             with open(IMAGE, "rb") as f:
                 ref = f.read(expected)
