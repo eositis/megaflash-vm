@@ -60,9 +60,9 @@ Settings persist in:
 
 1. In the app, click **Install network helper…** and approve the admin dialog once.
 2. That installs the helper and a sudoers rule for passwordless `enable|disable|status`.
-3. **Enable NAT** / MAME Wi‑Fi path can then call the helper without a password prompt.
+3. **Enable NAT** / MAME Wi‑Fi path can then call the helper without a password prompt. Bramble itself runs unelevated (utun + userspace UDP NAT do not need root once pf is on).
 
-Creating a utun for Bramble may still require elevation the first time unless sudoers is extended to cover the generated `.run/start-bramble-hostnet.sh` runner.
+Creating a utun for Bramble may still require elevation **only if the helper is not installed** (askpass dialog for `.run/start-bramble-hostnet.sh`).
 
 ## Architecture note
 

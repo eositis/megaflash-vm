@@ -52,6 +52,23 @@ AMPLE_ROMS="${AMPLE_ROMS:-$HOME/Library/Application Support/Ample/roms}"
 STAGE_DIR="$LOCAL_ROMS/apple2c4"
 VOX_DIR="$LOCAL_ROMS/votrsc01a"
 
+# Prefer a python3 that actually runs (GUI PATH may put Intel /usr/local/bin first).
+PYTHON3="${PYTHON3:-}"
+if [[ -z "$PYTHON3" ]]; then
+  for c in /opt/homebrew/bin/python3 /usr/bin/python3 python3; do
+    if [[ -x "$c" ]] || command -v "$c" >/dev/null 2>&1; then
+      if "$c" -c 'import sys' >/dev/null 2>&1; then
+        PYTHON3="$c"
+        break
+      fi
+    fi
+  done
+fi
+if [[ -z "$PYTHON3" ]]; then
+  echo "python3 not found (need a runnable interpreter for the a2bus wait)" >&2
+  exit 1
+fi
+
 if [[ ! -x "$BRAMBLE" ]]; then
   BRAMBLE="$BRAMBLE_ROOT/build/bramble"
 fi
@@ -174,7 +191,7 @@ SPI_FLASH2="${SPI_FLASH2:-$FLASH_DIR/spi-flash2.bin}"
 SPI_FLASH_ARGS=()
 if [[ -z "${NO_SPI_FLASH:-}" ]]; then
   SPI_FLASH_ARGS+=(-spi-flash1 "$SPI_FLASH1" -spi-flash2 "$SPI_FLASH2")
-  if [[ ! -f "$SPI_FLASH1" ]] || ! python3 - "$SPI_FLASH1" <<'PY'
+  if [[ ! -f "$SPI_FLASH1" ]] || ! "$PYTHON3" - "$SPI_FLASH1" <<'PY'
 import sys
 with open(sys.argv[1], "rb") as f:
     sample = f.read(65536)
@@ -234,45 +251,40 @@ if [[ "$HOST_NET" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
     sudo -n "$NET_HELPER" enable || true
   fi
 
-  RUN_DIR="$ROOT/.run"
-  mkdir -p "$RUN_DIR"
-  RUNNER="$RUN_DIR/start-bramble-hostnet.sh"
-  {
-    echo '#!/usr/bin/env bash'
-    echo 'set -euo pipefail'
-    echo "export BRAMBLE_ESCALATED=1"
-    echo "export BRAMBLE_ROOT=$(printf '%q' "$BRAMBLE_ROOT")"
-    echo "export PATH=$(printf '%q' "$PATH")"
-    if [[ "$USE_PASSWORDLESS" -eq 0 ]]; then
-      echo "$(printf '%q' "$HOST_NET_PREP") enable || true"
-    fi
-    echo "cd $(printf '%q' "$ROOT")"
-    printf 'exec'
-    printf ' %q' "$BRAMBLE" "$UF2" \
-      -arch m33 -clock 150 -cores 2 \
-      -a2bus-bridge "$PORT" \
-      -script "$STUB"
-    if ((${#SPI_FLASH_ARGS[@]})); then printf ' %q' "${SPI_FLASH_ARGS[@]}"; fi
-    if ((${#WIFI_ARGS[@]})); then printf ' %q' "${WIFI_ARGS[@]}"; fi
-    if [[ -n "${TIMEOUT:-}" ]]; then printf ' %q' -timeout "$TIMEOUT"; fi
-    if ((${#REGS_ARGS[@]})); then printf ' %q' "${REGS_ARGS[@]}"; fi
-    if (($#)); then printf ' %q' "$@"; fi
-    echo
-  } >"$RUNNER"
-  chmod +x "$RUNNER"
-
   if [[ "$USE_PASSWORDLESS" -eq 1 ]]; then
-    # Elevate Bramble for utun without interactive askpass when possible.
-    if sudo -n true 2>/dev/null; then
-      sudo -n -E "$RUNNER" &
-      BRAMBLE_PID=$!
-      BRAMBLE_ELEVATED=1
-    else
-      USE_PASSWORDLESS=0
-    fi
-  fi
+    # pf NAT is already on via the helper. utun + userspace UDP NAT do not need
+    # root; sudo -n true always fails for a GUI app, and sudo -A would prompt
+    # again then run Bramble as root for no benefit.
+    echo "[mame] starting Bramble unelevated (helper already enabled pf NAT)"
+    run_bramble "$@" &
+    BRAMBLE_PID=$!
+    BRAMBLE_ELEVATED=0
+  else
+    RUN_DIR="$ROOT/.run"
+    mkdir -p "$RUN_DIR"
+    RUNNER="$RUN_DIR/start-bramble-hostnet.sh"
+    {
+      echo '#!/usr/bin/env bash'
+      echo 'set -euo pipefail'
+      echo "export BRAMBLE_ESCALATED=1"
+      echo "export BRAMBLE_ROOT=$(printf '%q' "$BRAMBLE_ROOT")"
+      echo "export PATH=$(printf '%q' "$PATH")"
+      echo "$(printf '%q' "$HOST_NET_PREP") enable || true"
+      echo "cd $(printf '%q' "$ROOT")"
+      printf 'exec'
+      printf ' %q' "$BRAMBLE" "$UF2" \
+        -arch m33 -clock 150 -cores 2 \
+        -a2bus-bridge "$PORT" \
+        -script "$STUB"
+      if ((${#SPI_FLASH_ARGS[@]})); then printf ' %q' "${SPI_FLASH_ARGS[@]}"; fi
+      if ((${#WIFI_ARGS[@]})); then printf ' %q' "${WIFI_ARGS[@]}"; fi
+      if [[ -n "${TIMEOUT:-}" ]]; then printf ' %q' -timeout "$TIMEOUT"; fi
+      if ((${#REGS_ARGS[@]})); then printf ' %q' "${REGS_ARGS[@]}"; fi
+      if (($#)); then printf ' %q' "$@"; fi
+      echo
+    } >"$RUNNER"
+    chmod +x "$RUNNER"
 
-  if [[ "$USE_PASSWORDLESS" -eq 0 ]] || [[ -z "${BRAMBLE_PID:-}" ]]; then
     if [[ ! -f "$ASKPASS" ]]; then
       echo "askpass helper missing: $ASKPASS" >&2
       exit 1
@@ -295,7 +307,7 @@ else
   BRAMBLE_PID=$!
 fi
 
-python3 - "$PORT" <<'PY'
+"$PYTHON3" - "$PORT" <<'PY'
 import socket, sys, time
 port = int(sys.argv[1])
 deadline = time.time() + 90

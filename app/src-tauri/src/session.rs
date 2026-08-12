@@ -105,9 +105,10 @@ fn kill_opt(child: &mut Option<Child>) {
 }
 
 /// GUI apps on macOS do not inherit Homebrew PATH from the user's shell.
+/// Prefer Homebrew over `/usr/local/bin` (that tree often has stale Intel binaries).
 fn prepend_gui_path(cmd: &mut Command) {
     let mut path = std::env::var("PATH").unwrap_or_default();
-    for extra in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+    for extra in ["/usr/local/bin", "/opt/homebrew/sbin", "/opt/homebrew/bin"] {
         if !path.split(':').any(|p| p == extra) {
             path = format!("{extra}:{path}");
         }
