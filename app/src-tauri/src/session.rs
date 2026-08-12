@@ -690,6 +690,7 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
         .env("BRAMBLE_A2BUS_PORT", settings.a2bus_port.to_string())
         .env("MEGAFLASH_VM_ROOT", &settings.megaflash_vm_root)
         .env("MEGAFLASH_A2_MONITOR", &settings.color_mode)
+        .env("MEGAFLASH_A2_SCALE", settings.screen_scale.max(1).to_string())
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr);

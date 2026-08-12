@@ -42,7 +42,7 @@ The app bundle lands under:
 | Pico | Pick UF2, 0–2 SPI flash chips, Start/Stop overlay Bramble with `-usb-console pty:…` |
 | Console | Embedded xterm.js; select/copy; paste; optional file log |
 | XMODEM | After menu Upload → CONFIRM → `CCCC`, **XMODEM upload…** runs `scripts/test-xmodem-upload.py` (`XMODEM_SEND_ONLY`) while Operator keeps a PTY slave FD open. The helper waits for MegaFlash’s post-EOT menu (`Please Select`) before returning. Requires `python3` on PATH. |
-| //c handoff | **Launch //c** (or **Stop Pico & launch //c** if Pico is running) stops USB Bramble if needed and runs `scripts/run-megaflash-mame.sh`. Color mode sets MAME Apple II **Monitor type** (B&W=4) via cfg + Lua. Screen scale is integer window size (1×=560×384, 2×=1120×768) with `-nomaximize -resolution`. |
+| //c handoff | **Launch //c** runs `scripts/run-megaflash-mame.sh`. Display prefs come from Operator `settings.json` (not a stale `.app` env): B&W = MAME **Monitor type** 4; scale = `-intscalex`/`-intscaley` plus `-nomaximize -resolution`. |
 | Network helper | One-time admin install → `/usr/local/libexec/megaflash-net-helper.sh` + sudoers NOPASSWD for pf NAT |
 | Concurrent windows | UI toggle present but **disabled** (future) |
 

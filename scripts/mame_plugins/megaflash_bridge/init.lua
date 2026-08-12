@@ -9,7 +9,7 @@
 
 	local exports = {
 	name = "megaflash_bridge",
-	version = "0.1.7",
+	version = "0.1.8",
 	description = "Bramble MegaFlash $C0C0-$C0C3 TCP bridge",
 	license = "BSD-3-Clause",
 	author = { name = "eositis" }
@@ -139,8 +139,8 @@ function plugin.startplugin()
 
 	local function apply_video_prefs()
 		local mode = os.getenv("MEGAFLASH_A2_MONITOR")
-		if not mode or mode == "" or mode == "color" then
-			return
+		if not mode or mode == "" then
+			mode = "color"
 		end
 		local ports = manager.machine.ioport.ports
 		local port = ports[":a2video:a2_video_config"]
@@ -150,7 +150,11 @@ function plugin.startplugin()
 		end
 		local field = port.fields["Monitor type"]
 		if not field then
-			emu.print_error("megaflash_bridge: missing Monitor type field")
+			local names = {}
+			for name, _ in pairs(port.fields) do
+				names[#names + 1] = name
+			end
+			emu.print_error("megaflash_bridge: missing Monitor type field; have: " .. table.concat(names, ", "))
 			return
 		end
 		-- listxml: Color=0, B&W=4, Green=5, Amber=6
@@ -162,17 +166,13 @@ function plugin.startplugin()
 			v = 5
 		elseif m == "amber" then
 			v = 6
-		else
-			return
 		end
-		local ok = pcall(function()
+		pcall(function()
 			field.user_value = v
 		end)
-		if not ok then
-			pcall(function()
-				field:set_value(v)
-			end)
-		end
+		pcall(function()
+			field:set_value(v)
+		end)
 		logf("Monitor type=%s (value %d)", mode, v)
 	end
 
