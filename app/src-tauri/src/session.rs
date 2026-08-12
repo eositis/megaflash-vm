@@ -528,6 +528,23 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
                     .and_then(|n| n.parse::<usize>().ok())
             })
             .unwrap_or(0);
+        // Forward MegaFlash post-EOT summary / menu (consumed by the helper)
+        // into the Operator console so the user sees a clean exit.
+        let mut guest_tail = String::new();
+        for line in stdout.lines() {
+            if line.starts_with("Sending ")
+                || line.starts_with("  block ")
+                || line.starts_with("Done (")
+            {
+                continue;
+            }
+            guest_tail.push_str(line);
+            guest_tail.push('\n');
+        }
+        if !guest_tail.trim().is_empty() {
+            let msg = format!("\r\n{guest_tail}");
+            let _ = app.emit("console-data", msg.as_bytes().to_vec());
+        }
         Ok(sent)
     } else {
         let detail = if !stderr.trim().is_empty() {

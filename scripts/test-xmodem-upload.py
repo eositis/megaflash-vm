@@ -145,6 +145,10 @@ def send_xmodem_crc(pty: Pty, path: str, max_bytes: int) -> int:
 
     pty.write(b"\x04")
     ack = read_ack(pty)
+    # Some XMODEM receivers NAK the first EOT and require a second.
+    if ack == 0x15:
+        pty.write(b"\x04")
+        ack = read_ack(pty)
     if ack != 0x06:
         print(f"Warning: final ACK was {ack!r}", flush=True)
     return sent
@@ -167,6 +171,18 @@ def main() -> int:
             # Operator (or another client) already drove the menu to CCCC and is
             # holding a slave FD open so the PTY master does not hang up.
             sent = send_xmodem_crc(pty, IMAGE, MAX_BYTES)
+            # Wait until MegaFlash finishes post-EOT flash work and returns to
+            # the menu. Leaving early strands the guest in upload-wait (Ctrl-C).
+            tail = pty.read_until(b"Please Select:", timeout=7200.0)
+            text = tail.decode("utf-8", errors="replace")
+            if text.strip():
+                print(text, flush=True)
+            if b"blocks received" not in tail and b"Please Select:" not in tail:
+                print(
+                    "Warning: timed out waiting for MegaFlash menu after EOT",
+                    file=sys.stderr,
+                    flush=True,
+                )
             print(f"Done ({sent} bytes sent)", flush=True)
             return 0
 
@@ -179,7 +195,7 @@ def main() -> int:
         pty.write(b"CONFIRM\n")
         pty.read_until(b"Please start upload", timeout=30.0)
         sent = send_xmodem_crc(pty, IMAGE, MAX_BYTES)
-        tail = pty.read_until(b"blocks received", timeout=7200.0)
+        tail = pty.read_until(b"Please Select:", timeout=7200.0)
         print(tail.decode("utf-8", errors="replace"), flush=True)
         print(f"Done ({sent} bytes sent)", flush=True)
         if MAX_BYTES <= 0 or verify:
