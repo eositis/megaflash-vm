@@ -1,9 +1,12 @@
 //! Minimal XMODEM-CRC / 1K sender for the Operator PTY.
+//!
+//! Behavior is intentionally aligned with
+//! `megaflash-vm/scripts/test-xmodem-upload.py`, which is the known-good path
+//! for emulated MegaFlash uploads.
 
 use anyhow::{bail, Context, Result};
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
-use std::os::fd::AsFd;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -12,12 +15,10 @@ const STX: u8 = 0x02;
 const EOT: u8 = 0x04;
 const ACK: u8 = 0x06;
 const NAK: u8 = 0x15;
-const CAN: u8 = 0x18;
 const CRC_C: u8 = b'C';
 
-/// Match `scripts/test-xmodem-upload.py` / `test-32mb-xmodem.sh`. Emulated flash
-/// writes can stall MegaFlash well past a few tens of seconds per block.
-const ACK_TIMEOUT: Duration = Duration::from_secs(300);
+/// Same default as `test-xmodem-upload.py` / `test-32mb-xmodem.sh` (300 there).
+const ACK_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn crc16_xmodem(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
@@ -48,8 +49,6 @@ fn read_available(reader: &mut impl Read, buf: &mut Vec<u8>) -> Result<()> {
     }
 }
 
-/// Wait for MegaFlash's CRC invite. Require a run of `C`s so we do not match
-/// the letter in "Ctrl-C" / "CONFIRM".
 fn wait_for_receiver_c(pty: &mut File, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let mut buf = Vec::new();
@@ -75,53 +74,21 @@ fn wait_for_receiver_c(pty: &mut File, timeout: Duration) -> Result<()> {
     bail!("timeout waiting for receiver CCC — choose Upload → drive → CONFIRM first");
 }
 
-enum RxCtrl {
-    Ack,
-    Nak,
-    Cancel,
-}
-
-fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<RxCtrl> {
+/// Match Python `read_ack`: only ACK/NAK. Ignore CAN and other noise.
+fn wait_for_ack_nak(pty: &mut File, timeout: Duration) -> Result<u8> {
     let deadline = Instant::now() + timeout;
     let mut buf = Vec::new();
-    // Modern XMODEM requires consecutive CANs — a lone 0x18 is often noise and
-    // aborting on it leaves MegaFlash mid-transfer while Operator stops sending.
-    let mut can_run = 0u32;
     while Instant::now() < deadline {
-        let before = buf.len();
         read_available(pty, &mut buf)?;
-        for &b in &buf[before..] {
-            match b {
-                ACK => return Ok(RxCtrl::Ack),
-                NAK => return Ok(RxCtrl::Nak),
-                CAN => {
-                    can_run += 1;
-                    if can_run >= 2 {
-                        return Ok(RxCtrl::Cancel);
-                    }
-                }
-                _ => can_run = 0,
+        for &b in &buf {
+            if b == ACK || b == NAK {
+                return Ok(b);
             }
         }
-        if buf.len() > 65536 {
-            buf.drain(..buf.len() - 4096);
-        }
-        std::thread::sleep(Duration::from_millis(5));
+        buf.clear();
+        std::thread::sleep(Duration::from_millis(10));
     }
-    let preview: String = buf
-        .iter()
-        .rev()
-        .take(32)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|b| format!("{b:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if preview.is_empty() {
-        bail!("timeout waiting for ACK/NAK (no RX)");
-    }
-    bail!("timeout waiting for ACK/NAK (last RX: {preview})")
+    bail!("timeout waiting for ACK/NAK (no ACK/NAK seen)");
 }
 
 pub fn drain(pty: &mut File, ms: u64) {
@@ -133,23 +100,28 @@ pub fn drain(pty: &mut File, ms: u64) {
     }
 }
 
-/// Write an entire XMODEM frame with O_NONBLOCK cleared so the kernel accepts
-/// the full STX+payload before the guest's getraw starts timing a short read.
-fn write_frame_blocking(pty: &mut File, data: &[u8]) -> Result<()> {
-    use nix::fcntl::{fcntl, FcntlArg, OFlag};
-
-    let flags = fcntl(pty.as_fd(), FcntlArg::F_GETFL).context("F_GETFL")?;
-    let oflags = OFlag::from_bits_truncate(flags);
-    let blocking = oflags - OFlag::O_NONBLOCK;
-    fcntl(pty.as_fd(), FcntlArg::F_SETFL(blocking)).context("clear O_NONBLOCK")?;
-
-    let write_result = pty.write_all(data);
-    let flush_result = pty.flush();
-
-    let _ = fcntl(pty.as_fd(), FcntlArg::F_SETFL(oflags));
-
-    write_result.context("PTY blocking write")?;
-    match flush_result {
+/// Non-blocking write with retry — same strategy as the Python test driver.
+fn write_all_nb(pty: &mut File, data: &[u8], timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut off = 0usize;
+    while off < data.len() {
+        if Instant::now() >= deadline {
+            bail!(
+                "PTY write stalled at {}/{} bytes (non-blocking buffer full)",
+                off,
+                data.len()
+            );
+        }
+        match pty.write(&data[off..]) {
+            Ok(0) => std::thread::sleep(Duration::from_millis(5)),
+            Ok(n) => off += n,
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::Interrupted => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e).context("PTY write"),
+        }
+    }
+    match pty.flush() {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == ErrorKind::WouldBlock => Ok(()),
         Err(e) => Err(e).context("PTY flush"),
@@ -168,28 +140,29 @@ fn send_block(pty: &mut File, block: u8, chunk: &[u8]) -> Result<()> {
     frame.push((csum >> 8) as u8);
     frame.push((csum & 0xff) as u8);
 
+    // Python test driver: one shot, no retries. Keep a few retries for emu
+    // flakiness but do not retransmit for minutes after a dead receiver.
     let mut last_err = None;
-    for attempt in 1..=5 {
-        write_frame_blocking(pty, &frame)
+    for attempt in 1..=3 {
+        write_all_nb(pty, &frame, Duration::from_secs(30))
             .with_context(|| format!("write XMODEM frame block {block} attempt {attempt}"))?;
         match wait_for_ack_nak(pty, ACK_TIMEOUT) {
-            Ok(RxCtrl::Ack) => {
-                // MegaFlash ACKs before finishing the SPI write under emu.
-                std::thread::sleep(Duration::from_millis(50));
-                return Ok(());
-            }
-            Ok(RxCtrl::Nak) => {
+            Ok(ACK) => return Ok(()),
+            Ok(NAK) => {
                 last_err = Some(anyhow::anyhow!("NAK on block {block} attempt {attempt}"));
-                drain(pty, 250);
+                drain(pty, 100);
             }
-            Ok(RxCtrl::Cancel) => {
-                bail!("receiver cancelled (CAN×2) on block {block} attempt {attempt}");
+            Ok(other) => {
+                last_err = Some(anyhow::anyhow!(
+                    "unexpected response {other:#x} on block {block}"
+                ));
+                drain(pty, 100);
             }
             Err(e) => {
                 last_err = Some(e.context(format!(
                     "ACK/NAK wait failed on block {block} attempt {attempt}"
                 )));
-                drain(pty, 500);
+                drain(pty, 100);
             }
         }
     }
@@ -197,11 +170,6 @@ fn send_block(pty: &mut File, block: u8, chunk: &[u8]) -> Result<()> {
 }
 
 /// Send `path` with XMODEM-CRC (128 or 1K blocks) on one RDWR PTY fd.
-///
-/// Caller must own exclusive PTY read/write (console reader thread joined).
-///
-/// Important: do not write UI hints to the PTY while MegaFlash is in STATE_BEGIN —
-/// each non-SOH/STX byte increments its start-error counter and aborts (~30 chars).
 pub fn send_file(pty: &mut File, path: &Path) -> Result<usize> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let file_len = file.metadata().map(|m| m.len() as usize).unwrap_or(0);
@@ -210,13 +178,14 @@ pub fn send_file(pty: &mut File, path: &Path) -> Result<usize> {
     }
 
     wait_for_receiver_c(pty, Duration::from_secs(90))?;
-    drain(pty, 80);
+    drain(pty, 150);
 
     let mut block: u8 = 1;
     let mut sent = 0usize;
     let mut offset = 0usize;
 
     while offset < file_len {
+        // Prefer 1K while enough data remains; final short tail uses 128.
         let size = if file_len - offset >= 1024 { 1024 } else { 128 };
         let mut chunk = vec![0u8; size];
         let n = file.read(&mut chunk).context("read image")?;
@@ -233,7 +202,7 @@ pub fn send_file(pty: &mut File, path: &Path) -> Result<usize> {
         block = block.wrapping_add(1);
     }
 
-    write_frame_blocking(pty, &[EOT]).context("write EOT")?;
+    write_all_nb(pty, &[EOT], Duration::from_secs(10)).context("write EOT")?;
     let _ = wait_for_ack_nak(pty, Duration::from_secs(60));
     Ok(sent.min(file_len))
 }

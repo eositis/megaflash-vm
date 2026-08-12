@@ -282,11 +282,26 @@ fn configure_pty_raw(file: &File) -> Result<()> {
 }
 
 fn open_pty_rw(path: &Path) -> Result<File> {
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .open(path)
-        .with_context(|| format!("open PTY {}", path.display()))?;
+    let file = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            File::options()
+                .read(true)
+                .write(true)
+                .custom_flags(nix::libc::O_NOCTTY)
+                .open(path)
+                .with_context(|| format!("open PTY {}", path.display()))?
+        }
+        #[cfg(not(unix))]
+        {
+            File::options()
+                .read(true)
+                .write(true)
+                .open(path)
+                .with_context(|| format!("open PTY {}", path.display()))?
+        }
+    };
     configure_pty_raw(&file)?;
     // Non-blocking reads so XMODEM / console loops can poll with timeouts.
     {
