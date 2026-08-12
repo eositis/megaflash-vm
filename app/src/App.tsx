@@ -388,6 +388,12 @@ function App() {
               Allow concurrent USB console + MAME (future)
             </label>
 
+            <p className="hint">
+              USB console and Apple //c cannot share one Bramble process (firmware
+              skips the USB menu when Apple is connected). Launching //c stops Pico
+              if it is running, then starts overlay Bramble with the Apple-bus
+              bridge plus MAME.
+            </p>
             <div className="row actions">
               <button
                 type="button"
@@ -396,11 +402,15 @@ function App() {
                 onClick={() =>
                   void run(async () => {
                     await api.stopPicoAndStartMame();
-                    setMsg("Launched Apple //c + MegaFlash (Pico console stopped)");
+                    setMsg(
+                      status.picoRunning
+                        ? "Stopped Pico USB console and launched Apple //c + MegaFlash"
+                        : "Launched Apple //c + MegaFlash"
+                    );
                   })
                 }
               >
-                Stop Pico &amp; launch //c
+                {status.picoRunning ? "Stop Pico & launch //c" : "Launch //c"}
               </button>
               <button
                 type="button"

@@ -104,6 +104,31 @@ fn kill_opt(child: &mut Option<Child>) {
     }
 }
 
+/// GUI apps on macOS do not inherit Homebrew PATH from the user's shell.
+fn prepend_gui_path(cmd: &mut Command) {
+    let mut path = std::env::var("PATH").unwrap_or_default();
+    for extra in ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"] {
+        if !path.split(':').any(|p| p == extra) {
+            path = format!("{extra}:{path}");
+        }
+    }
+    cmd.env("PATH", path);
+}
+
+fn resolve_mame_bin() -> Option<PathBuf> {
+    for p in [
+        "/opt/homebrew/bin/mame",
+        "/usr/local/bin/mame",
+        "/opt/homebrew/sbin/mame",
+    ] {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    None
+}
+
 /// Kill orphaned `bramble … -usb-console pty:<path>` processes left after an
 /// Operator crash/relaunch. Two masters fighting one symlink corrupt XMODEM.
 fn kill_stale_bramble_for_pty(pty: &Path) {
@@ -649,9 +674,13 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
     let h = 384 * u32::from(scale) / 2;
     let resolution = format!("{w}x{h}");
 
-    let (stdout, stderr, _mame_stderr) = stdio_to_log("mame-stack")?;
+    let (stdout, stderr, mame_stderr) = stdio_to_log("mame-stack")?;
 
     let mut cmd = Command::new("bash");
+    prepend_gui_path(&mut cmd);
+    if let Some(mame) = resolve_mame_bin() {
+        cmd.env("MAME", mame);
+    }
     cmd.arg(&script)
         .current_dir(&root)
         .env("MEGAFLASH_UF2", &settings.uf2_path)
@@ -690,6 +719,26 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
     {
         let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
         procs.mame = Some(child);
+    }
+    // The wrapper exits immediately if mame/ROMs/bramble are missing. Surface
+    // that instead of reporting a live //c session that never appears.
+    thread::sleep(Duration::from_millis(1200));
+    {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(child) = procs.mame.as_mut() {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    procs.mame = None;
+                    let tail = stderr_tail(&mame_stderr, 4000);
+                    if tail.is_empty() {
+                        bail!("//c launch exited {status} (see {})", mame_stderr.display());
+                    }
+                    bail!("//c launch failed:\n{tail}");
+                }
+                Ok(None) => {}
+                Err(e) => bail!("//c launch status: {e}"),
+            }
+        }
     }
     let _ = app.emit("session-status", state.status());
     Ok(())

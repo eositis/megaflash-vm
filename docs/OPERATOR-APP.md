@@ -42,7 +42,7 @@ The app bundle lands under:
 | Pico | Pick UF2, 0–2 SPI flash chips, Start/Stop overlay Bramble with `-usb-console pty:…` |
 | Console | Embedded xterm.js; select/copy; paste; optional file log |
 | XMODEM | After menu Upload → CONFIRM → `CCCC`, **XMODEM upload…** runs `scripts/test-xmodem-upload.py` (`XMODEM_SEND_ONLY`) while Operator keeps a PTY slave FD open. The helper waits for MegaFlash’s post-EOT menu (`Please Select`) before returning. Requires `python3` on PATH. |
-| //c handoff | **Stop Pico & launch //c** stops USB Bramble and runs `scripts/run-megaflash-mame.sh` with ROM / color / scale / Wi‑Fi settings |
+| //c handoff | **Launch //c** (or **Stop Pico & launch //c** if Pico is running) stops USB Bramble if needed and runs `scripts/run-megaflash-mame.sh`. GUI PATH includes Homebrew so `mame` is found. Launch failures (missing mame/ROMs) are shown in the app banner from `mame-stack.stderr.log`. |
 | Network helper | One-time admin install → `/usr/local/libexec/megaflash-net-helper.sh` + sudoers NOPASSWD for pf NAT |
 | Concurrent windows | UI toggle present but **disabled** (future) |
 
