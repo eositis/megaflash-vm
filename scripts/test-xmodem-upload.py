@@ -88,9 +88,17 @@ class Pty:
 
 def read_ack(pty: Pty, timeout: float = 30.0) -> int:
     deadline = time.time() + timeout
+    text = b""
     while time.time() < deadline:
         b = pty.read1(0.5)
+        if not b:
+            continue
+        text += b
+        if b"Aborted" in text:
+            return -2
         for byte in b:
+            if byte == 0x18:
+                return byte
             if byte in (0x06, 0x15):
                 return byte
     return -1
@@ -103,19 +111,40 @@ def drain_pty(pty: Pty, timeout: float = 0.15) -> None:
             break
 
 
-def send_xmodem_crc(pty: Pty, path: str, max_bytes: int) -> int:
+def read_until_any(pty: Pty, needles: list[bytes], timeout: float) -> bytes:
+    buf = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        for n in needles:
+            if n in buf:
+                return buf
+        chunk = pty.read1(0.2)
+        if chunk:
+            buf += chunk
+    return buf
+
+
+def send_xmodem_crc(pty: Pty, path: str, max_bytes: int, wait_for_c: bool) -> int:
     with open(path, "rb") as f:
         payload = f.read() if max_bytes <= 0 else f.read(max_bytes)
 
     print(f"Sending {len(payload)} bytes from {path}", flush=True)
-    deadline = time.time() + 90.0
-    while time.time() < deadline:
-        b = pty.read1(0.5)
-        if b"C" in b:
-            break
+    if wait_for_c:
+        deadline = time.time() + 90.0
+        while time.time() < deadline:
+            b = pty.read1(0.5)
+            if b"C" in b:
+                break
+        else:
+            raise TimeoutError("Timed out waiting for receiver 'C'")
+        drain_pty(pty)
     else:
-        raise TimeoutError("Timed out waiting for receiver 'C'")
-    drain_pty(pty)
+        # Operator already drove the menu to CCCC. Firmware is blocked in
+        # usb_getchar waiting for SOH/STX. Waiting for another C here can
+        # miss the 90s window; leftover menu text with the letter C can also
+        # make us send too early. Transmit now.
+        drain_pty(pty, 0.05)
+        print("SEND_ONLY: first block (no extra C wait)", flush=True)
 
     block = 1
     offset = 0
@@ -135,6 +164,10 @@ def send_xmodem_crc(pty: Pty, path: str, max_bytes: int) -> int:
         frame = bytes([header]) + body + bytes([(csum >> 8) & 0xFF, csum & 0xFF])
         pty.write(frame)
         ack = read_ack(pty, timeout=ACK_TIMEOUT)
+        if ack == -2:
+            raise RuntimeError(f"MegaFlash aborted during block {block}")
+        if ack == 0x18:
+            raise RuntimeError(f"CAN on block {block}")
         if ack != 0x06:
             raise RuntimeError(f"NAK/timeout on block {block}: got {ack!r}")
         offset += size
@@ -170,14 +203,18 @@ def main() -> int:
         if send_only:
             # Operator (or another client) already drove the menu to CCCC and is
             # holding a slave FD open so the PTY master does not hang up.
-            sent = send_xmodem_crc(pty, IMAGE, MAX_BYTES)
-            # Wait until MegaFlash finishes post-EOT flash work and returns to
-            # the menu. Leaving early strands the guest in upload-wait (Ctrl-C).
-            tail = pty.read_until(b"Please Select:", timeout=7200.0)
+            sent = send_xmodem_crc(pty, IMAGE, MAX_BYTES, wait_for_c=False)
+            menu_timeout = float(os.environ.get("XMODEM_MENU_TIMEOUT", "300"))
+            tail = read_until_any(
+                pty, [b"Please Select:", b"Aborted."], timeout=menu_timeout
+            )
             text = tail.decode("utf-8", errors="replace")
             if text.strip():
                 print(text, flush=True)
-            if b"blocks received" not in tail and b"Please Select:" not in tail:
+            if b"Aborted" in tail:
+                print("MegaFlash aborted after/during XMODEM", file=sys.stderr, flush=True)
+                return 1
+            if b"Please Select:" not in tail and b"blocks received" not in tail:
                 print(
                     "Warning: timed out waiting for MegaFlash menu after EOT",
                     file=sys.stderr,
@@ -194,7 +231,7 @@ def main() -> int:
         pty.read_until(b"Type CONFIRM to proceed", timeout=30.0)
         pty.write(b"CONFIRM\n")
         pty.read_until(b"Please start upload", timeout=30.0)
-        sent = send_xmodem_crc(pty, IMAGE, MAX_BYTES)
+        sent = send_xmodem_crc(pty, IMAGE, MAX_BYTES, wait_for_c=True)
         tail = pty.read_until(b"Please Select:", timeout=7200.0)
         print(tail.decode("utf-8", errors="replace"), flush=True)
         print(f"Done ({sent} bytes sent)", flush=True)

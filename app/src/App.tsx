@@ -309,8 +309,9 @@ function App() {
             </div>
             <p className="hint">
               Upload: menu <strong>2</strong> → drive → type <strong>CONFIRM</strong> → wait for{" "}
-              <strong>CCCC</strong> → click XMODEM upload and pick the .po/.hdv/.dsk. Do not type in the
-              console while it is waiting for the transfer.
+              <strong>CCCC</strong> → click XMODEM upload. Accepts .po/.hdv/.dsk. Do not type in the
+              console while it is waiting. After CCCC the helper sends immediately and shows
+              <code> [xmodem] </code> progress; a 140KB image should finish in a few seconds.
             </p>
           </section>
 
@@ -481,7 +482,7 @@ function App() {
         </aside>
 
         <main className="console-pane">
-          <ConsoleView active={status.picoRunning} />
+          <ConsoleView active={status.picoRunning && !busy} />
         </main>
       </div>
     </div>

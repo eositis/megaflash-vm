@@ -3,7 +3,7 @@ use crate::xmodem;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -114,6 +114,31 @@ fn prepend_gui_path(cmd: &mut Command) {
         }
     }
     cmd.env("PATH", path);
+}
+
+fn resolve_python3() -> PathBuf {
+    for p in [
+        "/opt/homebrew/bin/python3",
+        "/usr/bin/python3",
+        "/usr/local/bin/python3",
+    ] {
+        let pb = PathBuf::from(p);
+        if !pb.is_file() {
+            continue;
+        }
+        if Command::new(&pb)
+            .arg("-c")
+            .arg("import sys")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return pb;
+        }
+    }
+    PathBuf::from("python3")
 }
 
 fn resolve_mame_bin() -> Option<PathBuf> {
@@ -532,19 +557,63 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
     );
     let _ = app.emit("console-data", note.as_bytes().to_vec());
 
-    let output = Command::new("python3")
+    let staging = std::env::temp_dir().join("megaflash-xmodem-upload.bin");
+    std::fs::copy(path, &staging)
+        .with_context(|| format!("copy {} to {}", path.display(), staging.display()))?;
+    let file_len = std::fs::metadata(&staging).map(|m| m.len()).unwrap_or(0);
+    let ack_timeout = if file_len > 1_048_576 { "300" } else { "45" };
+    let menu_timeout = if file_len > 8_388_608 { "7200" } else { "180" };
+
+    let python = resolve_python3();
+    let mut child = Command::new(&python);
+    prepend_gui_path(&mut child);
+    let mut child = child
         .arg(&script)
-        .arg(path)
+        .arg(&staging)
         .env("USB_CONSOLE_PTY_PATH", &pty_path)
         .env("XMODEM_SEND_ONLY", "1")
-        .env("XMODEM_ACK_TIMEOUT", "300")
+        .env("XMODEM_ACK_TIMEOUT", ack_timeout)
+        .env("XMODEM_MENU_TIMEOUT", menu_timeout)
+        .env("PYTHONUNBUFFERED", "1")
         .current_dir(&root)
-        .output()
-        .context("spawn python3 XMODEM helper")?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("spawn {} XMODEM helper", python.display()))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let result = if output.status.success() {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let app_out = app.clone();
+    let out_join = thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(out) = stdout {
+            for line in BufReader::new(out).lines() {
+                let Ok(line) = line else { break };
+                buf.push_str(&line);
+                buf.push('\n');
+                let msg = format!("\r\n[xmodem] {line}\r\n");
+                let _ = app_out.emit("console-data", msg.as_bytes().to_vec());
+            }
+        }
+        buf
+    });
+    let err_join = thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(err) = stderr {
+            for line in BufReader::new(err).lines() {
+                let Ok(line) = line else { break };
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+        }
+        buf
+    });
+    let status = child.wait().context("wait python3 XMODEM helper")?;
+    let stdout = out_join.join().unwrap_or_default();
+    let stderr = err_join.join().unwrap_or_default();
+    let _ = std::fs::remove_file(&staging);
+
+    let result = if status.success() {
         let sent = stdout
             .lines()
             .rev()
@@ -578,7 +647,7 @@ pub fn xmodem_upload(app: AppHandle, state: &Arc<SessionState>, path: &Path) -> 
         } else if !stdout.trim().is_empty() {
             stdout.trim().to_string()
         } else {
-            format!("python3 exited {}", output.status)
+            format!("python3 exited {status}")
         };
         Err(anyhow::anyhow!("{detail}"))
     };
