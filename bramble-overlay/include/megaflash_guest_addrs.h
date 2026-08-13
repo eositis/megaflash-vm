@@ -136,6 +136,11 @@
 #define USB_GUEST_READ_BLOCK          0x2000135cu /* ReadBlock (RAM) — DoReadBlock calls this */
 #define USB_GUEST_WRITE_BLOCK_VENEER  0x10034dc8u /* __WriteBlock_veneer */
 #define USB_GUEST_WRITE_BLOCK         0x200013f0u /* WriteBlock (RAM) */
+#define USB_GUEST_TS_ERASE_FLASH_DISK 0x100033b8u /* tsEraseFlashDisk */
+#define USB_GUEST_ERASE_ENTIRE_UNIT   0x1000367cu /* EraseEntireUnit */
+#define USB_GUEST_TS_ERASE_SECTOR_64K 0x10002facu /* tsEraseSector64k */
+#define USB_GUEST_WAIT_UNTIL_BUSY     0x10002b30u /* WaitUntilBusyClear */
+#define USB_GUEST_WAIT_UNTIL_BUSY_V   0x20004510u /* __WaitUntilBusyClear_veneer */
 #define USB_GUEST_CONFIG_BUFFER       0x2000bef4u
 #define USB_GUEST_CONFIG_MAGIC        0x5e97724cu
 #define USB_GUEST_CONFIG_FD_FLAGS_OFF 0xe2u

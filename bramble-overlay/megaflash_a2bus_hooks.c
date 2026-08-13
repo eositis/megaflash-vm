@@ -2395,6 +2395,26 @@ static int a2bus_spi_flash_hooks(void) {
         usb_guest_stub_write_block();
         return 1;
     }
+    /* CP Format "Erase the drive" → tsEraseFlashDisk / 64k SPI erase. InitSpi
+     * is skipped under a2bus so native erase hangs, BUSY unstick leaves PARAM
+     * garbage (Error:$ba), and the flash mutex can stay held → later IIc I/O
+     * stalls (Total Replay catalog scroll). Host-fill backing with 0xFF. */
+    if (pc == USB_GUEST_TS_ERASE_FLASH_DISK) {
+        usb_guest_stub_erase_flash_disk();
+        return 1;
+    }
+    if (pc == USB_GUEST_ERASE_ENTIRE_UNIT) {
+        usb_guest_stub_erase_entire_unit();
+        return 1;
+    }
+    if (pc == USB_GUEST_TS_ERASE_SECTOR_64K) {
+        usb_guest_stub_erase_sector_64k();
+        return 1;
+    }
+    if (pc == USB_GUEST_WAIT_UNTIL_BUSY || pc == USB_GUEST_WAIT_UNTIL_BUSY_V) {
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
+        return 1;
+    }
     /* TFTP/XMODEM image path — native SPI erase asserts under a2bus (InitSpi
      * skipped → bad GetBlockLoc). Same host backing as USB console. */
     if (pc == USB_GUEST_WRITE_BLOCK_IMAGE) {
