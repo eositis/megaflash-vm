@@ -273,7 +273,10 @@ function App() {
                 onClick={() =>
                   void run(async () => {
                     const p = await pickFile([
-                      { name: "ProDOS image", extensions: ["po", "hdv", "bin", "img"] },
+                      {
+                        name: "Disk image",
+                        extensions: ["po", "hdv", "dsk", "bin", "img"],
+                      },
                     ]);
                     if (!p) return;
                     // Do NOT writeConsole() here — MegaFlash XMODEM start treats
@@ -306,7 +309,7 @@ function App() {
             </div>
             <p className="hint">
               Upload: menu <strong>2</strong> → drive → type <strong>CONFIRM</strong> → wait for{" "}
-              <strong>CCCC</strong> → click XMODEM upload and pick the .po/.hdv. Do not type in the
+              <strong>CCCC</strong> → click XMODEM upload and pick the .po/.hdv/.dsk. Do not type in the
               console while it is waiting for the transfer.
             </p>
           </section>
@@ -347,6 +350,8 @@ function App() {
               >
                 <option value="color">Color</option>
                 <option value="bw">B&amp;W</option>
+                <option value="green">Green</option>
+                <option value="amber">Amber</option>
               </select>
             </label>
 

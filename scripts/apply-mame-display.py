@@ -26,10 +26,14 @@ INI_DIR = RUN / "mame-ini"
 INI = INI_DIR / "mame.ini"
 
 MONITOR_VAL = {
-    "bw": 4,
-    "mono": 4,
-    "b&w": 4,
-    "b/w": 4,
+    # listxml Monitor type (mask 7): Color=0, B&W=4, Green=5, Amber=6,
+    # "B&W for NTSC shader"=7 (true grayscale; MAME's B&W=4 still looks greenish).
+    "bw": 7,
+    "mono": 7,
+    "b&w": 7,
+    "b/w": 7,
+    "gray": 7,
+    "grey": 7,
     "green": 5,
     "amber": 6,
     "color": 0,

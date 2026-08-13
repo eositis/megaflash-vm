@@ -9,7 +9,7 @@
 
 	local exports = {
 	name = "megaflash_bridge",
-	version = "0.1.8",
+	version = "0.1.9",
 	description = "Bramble MegaFlash $C0C0-$C0C3 TCP bridge",
 	license = "BSD-3-Clause",
 	author = { name = "eositis" }
@@ -157,11 +157,11 @@ function plugin.startplugin()
 			emu.print_error("megaflash_bridge: missing Monitor type field; have: " .. table.concat(names, ", "))
 			return
 		end
-		-- listxml: Color=0, B&W=4, Green=5, Amber=6
+		-- listxml: Color=0, B&W=4, Green=5, Amber=6, B&W NTSC shader=7 (true gray)
 		local v = 0
 		local m = string.lower(mode)
-		if m == "bw" or m == "mono" or m == "b&w" or m == "b/w" then
-			v = 4
+		if m == "bw" or m == "mono" or m == "b&w" or m == "b/w" or m == "gray" or m == "grey" then
+			v = 7
 		elseif m == "green" then
 			v = 5
 		elseif m == "amber" then
@@ -169,9 +169,6 @@ function plugin.startplugin()
 		end
 		pcall(function()
 			field.user_value = v
-		end)
-		pcall(function()
-			field:set_value(v)
 		end)
 		logf("Monitor type=%s (value %d)", mode, v)
 	end

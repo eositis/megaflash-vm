@@ -101,7 +101,7 @@ Bring-up notes (a2bus):
 | `AMPLE_ROMS` | `~/Library/Application Support/Ample/roms` | Source for CHR/keyboard/speech staging only |
 | `BRAMBLE_IIC_BIN` | set by launcher to `IIC_BIN` | Optional Lua re-overlay path |
 | `MAME_EXTRA_ARGS` | unset | Extra MAME flags (stale Operator video flags are overridden; launcher applies window/monitor last) |
-| `MEGAFLASH_A2_MONITOR` | Operator `settings.json` `colorMode`, else `color` | Apple II Monitor type: `color`, `bw` (B&W=4), `green`, `amber` |
+| `MEGAFLASH_A2_MONITOR` | Operator `settings.json` `colorMode`, else `color` | `color` (0), `bw` (7, true grayscale / NTSC shader B&W), `green` (5), `amber` (6) |
 | `MEGAFLASH_A2_SCALE` | Operator `screenScale`, else `1` | Integer window scale (`-intscalex`/`-intscaley`) |
 | `TIMEOUT` | unset (none) | Bramble `-timeout` seconds |
 | `NO_WIFI` | unset | `1` = do not pass `-wifi` |
