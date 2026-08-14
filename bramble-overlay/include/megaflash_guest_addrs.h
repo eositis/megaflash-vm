@@ -139,6 +139,9 @@
 #define USB_GUEST_TS_ERASE_FLASH_DISK 0x100033b8u /* tsEraseFlashDisk */
 #define USB_GUEST_ERASE_ENTIRE_UNIT   0x1000367cu /* EraseEntireUnit */
 #define USB_GUEST_TS_ERASE_SECTOR_64K 0x10002facu /* tsEraseSector64k */
+#define USB_GUEST_TS_IS_SECTOR_ERASED 0x1000303cu /* tsIsSector64kErased */
+#define USB_GUEST_DO_ERASE_DISK       0x10002350u /* DoEraseDisk */
+#define USB_GUEST_DO_ERASE_DISK_V     0x20004410u /* __DoEraseDisk_veneer */
 #define USB_GUEST_WAIT_UNTIL_BUSY     0x10002b30u /* WaitUntilBusyClear */
 #define USB_GUEST_WAIT_UNTIL_BUSY_V   0x20004510u /* __WaitUntilBusyClear_veneer */
 #define USB_GUEST_CONFIG_BUFFER       0x2000bef4u

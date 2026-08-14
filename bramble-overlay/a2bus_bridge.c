@@ -442,8 +442,14 @@ static int a2bus_busy_is_long_command(void)
         return 1;
     if (pc >= 0x100025ccu && pc <= 0x10002700u) /* DoTFTPRun */
         return 1;
+    /* DoFormatDisk / DoEraseDisk (before tsEraseFlashDisk) */
+    if (pc >= 0x10002258u && pc <= 0x10002520u)
+        return 1;
     /* CP Format erase / 64k SPI wait — must not BUSY-unstick mid-command */
     if (pc >= 0x10002b30u && pc <= 0x10003700u)
+        return 1;
+    /* TranslateUnitNum / GetBlockLoc / IsValidUnitNum in SRAM */
+    if (pc >= 0x200010bcu && pc <= 0x20001280u)
         return 1;
     if (pc >= 0x10002738u && pc <= 0x10002900u) /* DoTFTPStatus */
         return 1;

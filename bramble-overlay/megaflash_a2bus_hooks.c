@@ -53,6 +53,12 @@ static int a2bus_fix_picoram_veneer(void) {
         cpu.r[15] = target | 1u;
         return 1;
     }
+    /* CMD_ERASEDISK: RAM veneer → DoEraseDisk. Host-complete here so we never
+     * enter native SPI erase (InitSpi skipped → hang → PARAM $ba). */
+    if (target == 0x10002350u) {
+        usb_guest_stub_do_erase_disk();
+        return 1;
+    }
     /* CheckWriteEnableKey: same class; DriveMapping uses index 1. */
     if (pc == 0x10034cd8u && target == 0x2000045cu) {
         cpu.r[15] = target | 1u;
@@ -63,12 +69,14 @@ static int a2bus_fix_picoram_veneer(void) {
         cpu.r[15] = target | 1u;
         return 1;
     }
-    /* Other veneers: only rewrite when the insn itself lives in Pico RAM. */
+    /* Other RAM veneers: rewrite PC to the flash target and fall through so
+     * command stubs (DoEraseDisk, etc.) see the real entry this same step.
+     * Returning 1 here skipped those stubs and executed the first native insn. */
     if (pc < 0x20000120u || pc >= 0x20005174u) {
         return 0;
     }
     cpu.r[15] = target | 1u;
-    return 1;
+    return 0;
 }
 
 static void usb_guest_a2bus_tx_byte(uint8_t ch) {
@@ -2395,10 +2403,14 @@ static int a2bus_spi_flash_hooks(void) {
         usb_guest_stub_write_block();
         return 1;
     }
-    /* CP Format "Erase the drive" → tsEraseFlashDisk / 64k SPI erase. InitSpi
-     * is skipped under a2bus so native erase hangs, BUSY unstick leaves PARAM
-     * garbage (Error:$ba), and the flash mutex can stay held → later IIc I/O
-     * stalls (Total Replay catalog scroll). Host-fill backing with 0xFF. */
+    /* CP Format erase: host-complete the command handler (RAM veneer otherwise
+     * executes the first native insn in the same cpu_step and never hits the
+     * tsEraseFlashDisk entry stub). Error $ba was leftover PARAM after BUSY
+     * unstick (core1 PC 0xFFFFFFFE). */
+    if (pc == USB_GUEST_DO_ERASE_DISK || pc == USB_GUEST_DO_ERASE_DISK_V) {
+        usb_guest_stub_do_erase_disk();
+        return 1;
+    }
     if (pc == USB_GUEST_TS_ERASE_FLASH_DISK) {
         usb_guest_stub_erase_flash_disk();
         return 1;
@@ -2409,6 +2421,11 @@ static int a2bus_spi_flash_hooks(void) {
     }
     if (pc == USB_GUEST_TS_ERASE_SECTOR_64K) {
         usb_guest_stub_erase_sector_64k();
+        return 1;
+    }
+    if (pc == USB_GUEST_TS_IS_SECTOR_ERASED) {
+        cpu.r[0] = 1u;
+        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }
     if (pc == USB_GUEST_WAIT_UNTIL_BUSY || pc == USB_GUEST_WAIT_UNTIL_BUSY_V) {
