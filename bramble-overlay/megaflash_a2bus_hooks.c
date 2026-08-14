@@ -1981,15 +1981,14 @@ static int a2bus_spi_flash_hooks(void) {
     }
 
     /*
-     * U2_Init must run u2_reset() so ip65's W5100 RTR probe at $C0C4–$C0C7
-     * sees $07/$D0 (Telnet65 "Device not found" otherwise). Skip only the
-     * pieces that hang under a2bus: U2_MonInit, U2_Net_Init, monitor flush.
+     * U2_Init must run u2_reset() and U2_Net_Init so ip65 DHCP/MACRAW works.
+     * Skip only UART monitor helpers that hang under a2bus.
      */
     if (pc == USB_GUEST_U2_INIT || pc == USB_GUEST_U2_INIT_CALL) {
         static int u2_logged;
         if (!u2_logged++) {
             fprintf(stderr,
-                    "[A2Bus] U2_Init (u2_reset for W5100; skip MonInit/Net_Init)\n");
+                    "[A2Bus] U2_Init (u2_reset + U2_Net_Init; skip MonInit)\n");
             fflush(stderr);
         }
         return 0;
@@ -2009,14 +2008,12 @@ static int a2bus_spi_flash_hooks(void) {
     if (pc == USB_GUEST_U2_NET_INIT) {
         static int u2net_logged;
         if (!u2net_logged++) {
-            fprintf(stderr, "[A2Bus] skip U2_Net_Init (W5100 regs still via u2_reset)\n");
+            fprintf(stderr, "[A2Bus] U2_Net_Init (MACRAW session)\n");
         }
-        cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
-        return 1;
+        return 0;
     }
-    if (pc == USB_GUEST_U2_MON_PUSH || pc == USB_GUEST_U2_NET_POLL ||
-        pc == USB_GUEST_U2_MON_POLL_FLUSH || pc == 0x20004478u ||
-        pc == 0x10006bc0u /* U2_Poll */ || pc == 0x200045a0u) {
+    if (pc == USB_GUEST_U2_MON_PUSH || pc == USB_GUEST_U2_MON_POLL_FLUSH ||
+        pc == 0x20004478u) {
         cpu.r[15] = (cpu.r[14] & ~1u) | 1u;
         return 1;
     }

@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -97,10 +98,52 @@ impl SessionState {
     }
 }
 
+/// SIGKILL on the bash wrapper skips its EXIT trap, so MAME/Bramble survive.
+/// Spawn the stack in its own process group and signal the whole group.
+fn kill_process_group(pid: u32) {
+    let ipid = pid as i32;
+    unsafe {
+        let _ = nix::libc::killpg(ipid, nix::libc::SIGTERM);
+    }
+    thread::sleep(Duration::from_millis(400));
+    unsafe {
+        let _ = nix::libc::killpg(ipid, nix::libc::SIGKILL);
+        let _ = nix::libc::kill(ipid, nix::libc::SIGKILL);
+    }
+}
+
 fn kill_opt(child: &mut Option<Child>) {
     if let Some(mut c) = child.take() {
-        let _ = c.kill();
+        kill_process_group(c.id());
         let _ = c.wait();
+    }
+}
+
+fn kill_pgrep_needle(needle: &str) {
+    let Ok(output) = Command::new("pgrep").arg("-lf").arg(needle).output() else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.contains(needle) {
+            continue;
+        }
+        let Some(pid_str) = line.split_whitespace().next() else {
+            continue;
+        };
+        let _ = Command::new("kill").args(["-TERM", pid_str]).status();
+    }
+    thread::sleep(Duration::from_millis(200));
+    let Ok(output) = Command::new("pgrep").arg("-lf").arg(needle).output() else {
+        return;
+    };
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if !line.contains(needle) {
+            continue;
+        }
+        let Some(pid_str) = line.split_whitespace().next() else {
+            continue;
+        };
+        let _ = Command::new("kill").args(["-KILL", pid_str]).status();
     }
 }
 
@@ -225,9 +268,15 @@ pub fn stop_pico(state: &SessionState) {
 }
 
 pub fn stop_mame(state: &SessionState) {
-    let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
-    kill_opt(&mut procs.mame);
-    kill_opt(&mut procs.a2bus_bramble);
+    {
+        let mut procs = state.procs.lock().unwrap_or_else(|e| e.into_inner());
+        kill_opt(&mut procs.mame);
+        kill_opt(&mut procs.a2bus_bramble);
+    }
+    // Grandchildren that left the wrapper group (sudo/utun, stray apple2c4).
+    kill_pgrep_needle("apple2c4");
+    kill_pgrep_needle("a2bus-bridge");
+    let _ = crate::mame_win::hide_mame_windows();
 }
 
 fn spi_args(settings: &Settings) -> Vec<String> {
@@ -748,6 +797,7 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
     let (stdout, stderr, mame_stderr) = stdio_to_log("mame-stack")?;
 
     let mut cmd = Command::new("bash");
+    cmd.process_group(0);
     prepend_gui_path(&mut cmd);
     if let Some(mame) = resolve_mame_bin() {
         cmd.env("MAME", mame);

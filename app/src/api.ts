@@ -21,4 +21,11 @@ export const api = {
     invoke<string>("xmodem_upload_message", { path }),
   xmodemUpload: (path: string) => invoke<string>("xmodem_upload", { path }),
   syncFirmware: () => invoke<string>("sync_firmware"),
+  placeMameWindow: (args: {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    visible: boolean;
+  }) => invoke<void>("place_mame_window", args),
 };

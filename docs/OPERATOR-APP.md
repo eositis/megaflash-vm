@@ -43,6 +43,7 @@ The app bundle lands under:
 | Console | Embedded xterm.js; select/copy; paste; optional file log |
 | XMODEM | After menu Upload → CONFIRM → `CCCC`, **XMODEM upload…** copies the file to a temp path and runs `scripts/test-xmodem-upload.py` (`XMODEM_SEND_ONLY`) without waiting for another `C`. Progress lines appear as `[xmodem] …`. Abort/`Please Select` ends the wait (not a 2-hour hang). File picker: `.po` / `.hdv` / `.dsk` / `.bin` / `.img`. |
 | Pico / //c | **Collapsible** setup sections (paths, flash, display); Start/Stop stay visible. Left pane scrolls independently of the USB console. Window is capped to the current screen. |
+| Right pane | Tabs: **USB console** and **Apple //c**. Launching //c selects the Apple tab and docks the MAME window over that pane (macOS Accessibility may prompt). **Stop //c** signals the whole process group (bash wrapper + MAME + overlay Bramble). |
 | //c handoff | **Launch //c** runs `scripts/run-megaflash-mame.sh`. Display prefs come from Operator `settings.json`: monitor **Color / B&W / Green / Amber** (B&W = MAME value 7, true grayscale); scale = `-intscalex`/`-intscaley` plus `-nomaximize -resolution`. MAME Lua forwards `$C0C0–$C0C7` (MegaFlash + Uthernet II). |
 | Network helper | One-time admin install → `/usr/local/libexec/megaflash-net-helper.sh` + sudoers NOPASSWD for pf NAT |
 | Concurrent windows | UI toggle present but **disabled** (future) |

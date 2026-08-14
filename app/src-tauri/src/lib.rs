@@ -1,3 +1,4 @@
+mod mame_win;
 mod net_helper;
 mod session;
 mod settings;
@@ -102,6 +103,13 @@ async fn stop_mame(app: AppHandle, state: State<'_, Arc<SessionState>>) -> Resul
     .map_err(|e| e.to_string())?;
     let _ = app.emit("session-status", status);
     Ok(())
+}
+
+#[tauri::command]
+async fn place_mame_window(x: i32, y: i32, w: i32, h: i32, visible: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || mame_win::place_mame_window(x, y, w, h, visible))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -226,6 +234,7 @@ pub fn run() {
             write_console,
             start_mame,
             stop_mame,
+            place_mame_window,
             stop_pico_and_start_mame,
             net_helper_status,
             net_helper_install,

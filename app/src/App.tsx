@@ -9,6 +9,7 @@ import {
 import { api } from "./api";
 import type { NetHelperStatus, SessionStatus, Settings } from "./types";
 import { ConsoleView } from "./components/ConsoleView";
+import { IicDock } from "./components/IicDock";
 import "./App.css";
 
 function loadCollapsed(key: string, fallback: boolean): boolean {
@@ -50,6 +51,7 @@ function App() {
   const [msg, setMsg] = useState("");
   const [picoOpen, setPicoOpen] = useState(() => !loadCollapsed("op.picoCollapsed", true));
   const [iicOpen, setIicOpen] = useState(() => !loadCollapsed("op.iicCollapsed", true));
+  const [rightTab, setRightTab] = useState<"console" | "iic">("console");
 
   const refresh = async () => {
     // Sequential invokes — avoid overlapping sync IPC on the UI thread.
@@ -83,7 +85,14 @@ function App() {
       }
     })();
     void capWindowToScreen().catch(() => {});
-    const u1 = listen<SessionStatus>("session-status", (ev) => setStatus(ev.payload));
+    const u1 = listen<SessionStatus>("session-status", (ev) => {
+      setStatus(ev.payload);
+      if (ev.payload.mameRunning) {
+        setRightTab("iic");
+      } else {
+        setRightTab("console");
+      }
+    });
     return () => {
       void u1.then((f) => f());
     };
@@ -561,7 +570,40 @@ function App() {
         </aside>
 
         <main className="console-pane">
-          <ConsoleView active={status.picoRunning && !busy} />
+          <div className="pane-tabs" role="tablist">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={rightTab === "console"}
+              className={rightTab === "console" ? "on" : ""}
+              onClick={() => setRightTab("console")}
+            >
+              USB console
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={rightTab === "iic"}
+              className={rightTab === "iic" ? "on" : ""}
+              onClick={() => setRightTab("iic")}
+            >
+              Apple //c
+            </button>
+          </div>
+          <div
+            className={rightTab === "console" ? "pane-body" : "pane-body hidden"}
+            role="tabpanel"
+          >
+            <ConsoleView
+              active={status.picoRunning && !busy && rightTab === "console"}
+            />
+          </div>
+          <div
+            className={rightTab === "iic" ? "pane-body" : "pane-body hidden"}
+            role="tabpanel"
+          >
+            <IicDock running={status.mameRunning} active={rightTab === "iic"} />
+          </div>
         </main>
       </div>
     </div>

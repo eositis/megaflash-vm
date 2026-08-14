@@ -522,120 +522,12 @@ static void a2bus_unstick_busloop(const char *why)
     cores[CORE1].is_wfi = 0;
 }
 
-/*
- * Host-side Uthernet II ($C0C4–$C0C7). Guest BusLoop's U2 path waits on PIO
- * IRQ 0 then U2_HandleBusAccess; under a2bus that can stall, so ip65's W5100
- * RTR probe ($0017/$0018 = $07/$D0) never sees a chip → Telnet65 "Device not found".
- * Indirect MR/addr/data is enough for that probe (and SHAR/RMSR). MACRAW/DHCP
- * still needs guest U2_Net_Init/Poll later.
- */
-#define HOST_U2_MR_RST 0x80u
-#define HOST_U2_MR_AI  0x02u
-
-static uint8_t host_u2_mr;
-static uint16_t host_u2_addr;
-static uint8_t host_u2_mem[0x8000];
-static int host_u2_ready;
-
-static void host_u2_chip_reset(void)
-{
-    memset(host_u2_mem, 0, sizeof(host_u2_mem));
-    host_u2_mr = 0;
-    /* data_address is not cleared on W5100 soft reset; first use starts at 0. */
-    host_u2_mem[0x17] = 0x07; /* RTR0 */
-    host_u2_mem[0x18] = 0xD0; /* RTR1 */
-    host_u2_mem[0x19] = 0x08; /* RCR */
-    host_u2_mem[0x1a] = 0x06; /* RMSR */
-    host_u2_mem[0x1b] = 0x06; /* TMSR */
-    host_u2_mem[0x28] = 0x28; /* PTIMER */
-    host_u2_mem[0x09] = 0x00; /* SHAR WIZnet OUI + ip65 default */
-    host_u2_mem[0x0a] = 0x08;
-    host_u2_mem[0x0b] = 0xDC;
-    host_u2_mem[0x0c] = 0xA2;
-    host_u2_mem[0x0d] = 0xA2;
-    host_u2_mem[0x0e] = 0xA2;
-    host_u2_ready = 1;
-}
-
-static void host_u2_autoinc(void)
-{
-    if (host_u2_mr & HOST_U2_MR_AI) {
-        host_u2_addr = (uint16_t)((host_u2_addr + 1u) & 0x7FFFu);
-    }
-}
-
-static int host_u2_read(uint8_t nibble, uint8_t *out)
-{
-    if (!host_u2_ready) {
-        host_u2_chip_reset();
-    }
-    switch (nibble & 3u) {
-    case 0:
-        *out = host_u2_mr;
-        return 1;
-    case 1:
-        *out = (uint8_t)(host_u2_addr >> 8);
-        return 1;
-    case 2:
-        *out = (uint8_t)(host_u2_addr & 0xFFu);
-        return 1;
-    default: {
-        uint16_t a = host_u2_addr & 0x7FFFu;
-        *out = (a == 0u) ? host_u2_mr : host_u2_mem[a];
-        host_u2_autoinc();
-        return 1;
-    }
-    }
-}
-
-static int host_u2_write(uint8_t nibble, uint8_t wdata)
-{
-    if (!host_u2_ready) {
-        host_u2_chip_reset();
-    }
-    switch (nibble & 3u) {
-    case 0:
-        if (wdata & HOST_U2_MR_RST) {
-            host_u2_chip_reset();
-        } else {
-            host_u2_mr = wdata;
-        }
-        return 1;
-    case 1:
-        host_u2_addr = (uint16_t)((host_u2_addr & 0x00FFu) | ((uint16_t)wdata << 8));
-        return 1;
-    case 2:
-        host_u2_addr = (uint16_t)((host_u2_addr & 0xFF00u) | wdata);
-        return 1;
-    default: {
-        uint16_t a = host_u2_addr & 0x7FFFu;
-        if (a == 0u) {
-            if (wdata & HOST_U2_MR_RST) {
-                host_u2_chip_reset();
-            } else {
-                host_u2_mr = wdata;
-            }
-        } else {
-            host_u2_mem[a] = wdata;
-        }
-        host_u2_autoinc();
-        return 1;
-    }
-    }
-}
-
 static int host_fast_read(uint8_t nibble, uint8_t *out)
 {
     nibble &= 0xFu;
-    if (nibble >= 4u && nibble <= 7u) {
-        static int u2rd_logged;
-        int ok = host_u2_read(nibble, out);
-        if (u2rd_logged < 12) {
-            u2rd_logged++;
-            fprintf(stderr, "[A2Bus] U2 RD $C0C%X -> 0x%02X addr=0x%04X mr=0x%02X\n",
-                    nibble, *out, host_u2_addr, host_u2_mr);
-        }
-        return ok;
+    /* $C0C4–$C0C7 = guest U2_HandleBusAccess (MACRAW/DHCP). Do not host-complete. */
+    if (nibble >= 4u) {
+        return 0;
     }
     /*
      * ID must toggle even while BUSY: Apple chkmegaflash is only two ID reads.
@@ -682,15 +574,8 @@ static int host_fast_read(uint8_t nibble, uint8_t *out)
 static int host_fast_write(uint8_t nibble, uint8_t wdata)
 {
     nibble &= 0xFu;
-    if (nibble >= 4u && nibble <= 7u) {
-        static int u2wr_logged;
-        int ok = host_u2_write(nibble, wdata);
-        if (u2wr_logged < 12) {
-            u2wr_logged++;
-            fprintf(stderr, "[A2Bus] U2 WR $C0C%X <- 0x%02X addr=0x%04X mr=0x%02X\n",
-                    nibble, wdata, host_u2_addr, host_u2_mr);
-        }
-        return ok;
+    if (nibble >= 4u) {
+        return 0; /* guest U2 */
     }
     if (!mf_native_mode() || (peek_reg(0) & MF_BUSYFLAG) != 0) {
         return 0;
@@ -800,6 +685,14 @@ static void handle_one(void)
             data = peek_reg(nibble);
             a2bus_inject_read(nibble & 0xFu);
             pump_guest();
+            if ((nibble & 0xFu) >= 4u) {
+                static int u2rd;
+                if (u2rd < 16) {
+                    u2rd++;
+                    fprintf(stderr, "[A2Bus] U2 inject RD $C0C%X pre=0x%02X post=0x%02X\n",
+                            nibble & 0xFu, data, peek_reg(nibble));
+                }
+            }
             /* STATUS still BUSY after a full pump → DoCommand hung. */
             if ((nibble & 0xFu) == 0u) {
                 uint8_t st = peek_reg(0);
@@ -827,6 +720,14 @@ static void handle_one(void)
         if (!host_fast_write(nibble, wdata)) {
             a2bus_inject_write(nibble & 0xFu, wdata);
             pump_guest();
+            if ((nibble & 0xFu) >= 4u) {
+                static int u2wr;
+                if (u2wr < 16) {
+                    u2wr++;
+                    fprintf(stderr, "[A2Bus] U2 inject WR $C0C%X <- 0x%02X\n",
+                            nibble & 0xFu, wdata);
+                }
+            }
         }
         data = peek_reg(nibble);
         break;

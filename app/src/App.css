@@ -259,6 +259,43 @@ button.primary:hover:not(:disabled) {
   padding: 0.75rem;
 }
 
+.pane-tabs {
+  display: flex;
+  gap: 0.25rem;
+  flex-shrink: 0;
+  margin-bottom: 0.45rem;
+}
+
+.pane-tabs button {
+  font-size: 0.78rem;
+  padding: 0.3rem 0.7rem;
+}
+
+.pane-tabs button.on {
+  background: #238636;
+  border-color: #2ea043;
+}
+
+.pane-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pane-body.hidden {
+  display: none;
+}
+
+.iic-dock {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  background: #0d1117;
+  padding: 0.75rem;
+}
+
 .console-wrap {
   flex: 1;
   min-height: 0;

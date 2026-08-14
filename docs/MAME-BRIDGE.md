@@ -118,13 +118,13 @@ Client (MAME plugin) → server (Bramble):
 |----|-------|---------|
 | `0x00` | op | PING |
 | `0x01` | op | PHI0 pulse |
-| `0x02` | op, nibble | Inject READ `$C0C0+nibble`; MegaFlash (0–3) returns **pre-cycle** shadow; Uthernet II (4–7) is host W5100 |
-| `0x03` | op, nibble, data | Inject WRITE (U2 4–7 host-completed; no guest pump) |
+| `0x02` | op, nibble | Inject READ `$C0C0+nibble`; MegaFlash (0–3) may host-fast-path; Uthernet II (4–7) always injects guest BusLoop |
+| `0x03` | op, nibble, data | Inject WRITE (U2 4–7 always guest; MegaFlash DATA/PARAM may host-fast-path) |
 | `0x04` | op, nibble | PEEK register shadow (no bus inject) |
 
 Reply: `status` (0 = ok), `data`.
 
-**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. The overlay **host-completes** those nibbles as a W5100 indirect window (MR / addr / data, default RTR `$07/$D0`, RMSR `$06`, SHAR `00:08:DC:A2:A2:A2`) so ip65’s RTR XOR probe succeeds. Guest `U2_Init` still runs `u2_reset` (MonInit/Net_Init skipped). MACRAW/DHCP still needs guest `U2_Net_Init`/`U2_Net_Poll` without stalling LoadAllConfigs.
+**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. Those cycles are **injected into guest BusLoop** so `U2_HandleBusAccess` runs (socket OPEN/MACRAW/SEND). Overlay lets `U2_Init` run `u2_reset` and `U2_Net_Init` (MonInit / UART monitor still skipped). `U2_Poll` / `U2_Net_Poll` run so DHCP frames reach TAP. Host-completing only the W5100 window was enough for “device found” but left the IP stack dead.
 
 Firmware boots in **Slinky** mode (`registers[2] == 0xf0`). MegaFlash ROM (or the activation read sequence `$C0C2,$C0C0,$C0C0,$C0C3,$C0C1`) switches to native mode; then `$C0C3` ID is **`$96`** (reads toggle with `~` per MegaFlash).
 
