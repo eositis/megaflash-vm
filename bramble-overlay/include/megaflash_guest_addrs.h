@@ -142,6 +142,10 @@
 #define USB_GUEST_TS_IS_SECTOR_ERASED 0x1000303cu /* tsIsSector64kErased */
 #define USB_GUEST_DO_ERASE_DISK       0x10002350u /* DoEraseDisk */
 #define USB_GUEST_DO_ERASE_DISK_V     0x20004410u /* __DoEraseDisk_veneer */
+#define USB_GUEST_DO_FORMAT_DISK      0x10002258u /* DoFormatDisk */
+#define USB_GUEST_DO_FORMAT_DISK_V    0x200045b0u /* __DoFormatDisk_veneer */
+#define USB_GUEST_DO_READ_BLOCK_CMD   0x200004dcu /* DoReadBlock (RAM) */
+#define USB_GUEST_DO_WRITE_BLOCK_CMD  0x20000534u /* DoWriteBlock (RAM) */
 #define USB_GUEST_WAIT_UNTIL_BUSY     0x10002b30u /* WaitUntilBusyClear */
 #define USB_GUEST_WAIT_UNTIL_BUSY_V   0x20004510u /* __WaitUntilBusyClear_veneer */
 #define USB_GUEST_CONFIG_BUFFER       0x2000bef4u

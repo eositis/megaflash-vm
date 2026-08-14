@@ -55,8 +55,20 @@ static int a2bus_fix_picoram_veneer(void) {
     }
     /* CMD_ERASEDISK: RAM veneer → DoEraseDisk. Host-complete here so we never
      * enter native SPI erase (InitSpi skipped → hang → PARAM $ba). */
-    if (target == 0x10002350u) {
+    if (target == 0x10002350u) { /* DoEraseDisk */
         usb_guest_stub_do_erase_disk();
+        return 1;
+    }
+    if (target == 0x10002258u) { /* DoFormatDisk */
+        usb_guest_stub_do_format_disk();
+        return 1;
+    }
+    if (target == 0x200004dcu) { /* DoReadBlock */
+        usb_guest_stub_do_read_block_cmd();
+        return 1;
+    }
+    if (target == 0x20000534u) { /* DoWriteBlock */
+        usb_guest_stub_do_write_block_cmd();
         return 1;
     }
     /* CheckWriteEnableKey: same class; DriveMapping uses index 1. */
@@ -2409,6 +2421,18 @@ static int a2bus_spi_flash_hooks(void) {
      * unstick (core1 PC 0xFFFFFFFE). */
     if (pc == USB_GUEST_DO_ERASE_DISK || pc == USB_GUEST_DO_ERASE_DISK_V) {
         usb_guest_stub_do_erase_disk();
+        return 1;
+    }
+    if (pc == USB_GUEST_DO_FORMAT_DISK || pc == USB_GUEST_DO_FORMAT_DISK_V) {
+        usb_guest_stub_do_format_disk();
+        return 1;
+    }
+    if (pc == USB_GUEST_DO_READ_BLOCK_CMD) {
+        usb_guest_stub_do_read_block_cmd();
+        return 1;
+    }
+    if (pc == USB_GUEST_DO_WRITE_BLOCK_CMD) {
+        usb_guest_stub_do_write_block_cmd();
         return 1;
     }
     if (pc == USB_GUEST_TS_ERASE_FLASH_DISK) {
