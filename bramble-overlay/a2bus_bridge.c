@@ -2,6 +2,7 @@
 #include "a2bus.h"
 #include "devtools.h"
 #include "emulator.h"
+#include "host_uthernet.h"
 #include "pio.h"
 
 #include <errno.h>
@@ -275,6 +276,7 @@ int a2bus_bridge_init(void)
     br.active = 1;
     fprintf(stderr, "[A2Bus] bridge listening on 127.0.0.1:%d (regs @ 0x%08X)\n",
             br.port, br.regs_addr);
+    host_u2_init();
     return 0;
 }
 
@@ -525,9 +527,16 @@ static void a2bus_unstick_busloop(const char *why)
 static int host_fast_read(uint8_t nibble, uint8_t *out)
 {
     nibble &= 0xFu;
-    /* $C0C4–$C0C7 = guest U2_HandleBusAccess (MACRAW/DHCP). Do not host-complete. */
+    /* $C0C4–$C0C7: host W5100 (guest inject does not update DATA). */
     if (nibble >= 4u) {
-        return 0;
+        static int u2rd;
+        int ok = host_u2_read(nibble, out);
+        if (u2rd < 20) {
+            u2rd++;
+            fprintf(stderr, "[A2Bus] U2 host RD $C0C%X -> 0x%02X\n",
+                    nibble, *out);
+        }
+        return ok;
     }
     /*
      * ID must toggle even while BUSY: Apple chkmegaflash is only two ID reads.
@@ -575,7 +584,14 @@ static int host_fast_write(uint8_t nibble, uint8_t wdata)
 {
     nibble &= 0xFu;
     if (nibble >= 4u) {
-        return 0; /* guest U2 */
+        static int u2wr;
+        int ok = host_u2_write(nibble, wdata);
+        if (u2wr < 20) {
+            u2wr++;
+            fprintf(stderr, "[A2Bus] U2 host WR $C0C%X <- 0x%02X\n",
+                    nibble, wdata);
+        }
+        return ok;
     }
     if (!mf_native_mode() || (peek_reg(0) & MF_BUSYFLAG) != 0) {
         return 0;
@@ -685,14 +701,6 @@ static void handle_one(void)
             data = peek_reg(nibble);
             a2bus_inject_read(nibble & 0xFu);
             pump_guest();
-            if ((nibble & 0xFu) >= 4u) {
-                static int u2rd;
-                if (u2rd < 16) {
-                    u2rd++;
-                    fprintf(stderr, "[A2Bus] U2 inject RD $C0C%X pre=0x%02X post=0x%02X\n",
-                            nibble & 0xFu, data, peek_reg(nibble));
-                }
-            }
             /* STATUS still BUSY after a full pump → DoCommand hung. */
             if ((nibble & 0xFu) == 0u) {
                 uint8_t st = peek_reg(0);
@@ -720,14 +728,6 @@ static void handle_one(void)
         if (!host_fast_write(nibble, wdata)) {
             a2bus_inject_write(nibble & 0xFu, wdata);
             pump_guest();
-            if ((nibble & 0xFu) >= 4u) {
-                static int u2wr;
-                if (u2wr < 16) {
-                    u2wr++;
-                    fprintf(stderr, "[A2Bus] U2 inject WR $C0C%X <- 0x%02X\n",
-                            nibble & 0xFu, wdata);
-                }
-            }
         }
         data = peek_reg(nibble);
         break;
@@ -760,6 +760,7 @@ void a2bus_bridge_poll(void)
     if (!br.active || br.handling) {
         return;
     }
+    host_u2_poll();
 
     if (br.listen_fd >= 0 && br.client_fd < 0) {
         struct sockaddr_in client_addr;

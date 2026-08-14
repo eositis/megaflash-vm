@@ -833,6 +833,15 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
         resolution,
     ];
     cmd.env("MAME_EXTRA_ARGS", extra.join(" "));
+    if let Some((x, y, w, h)) = crate::mame_win::last_geom() {
+        cmd.env("SDL_VIDEO_WINDOW_POS", format!("{x},{y}"));
+        cmd.env("SDL_VIDEO_CENTERED", "0");
+        cmd.env("MEGAFLASH_MAME_POS", format!("{x},{y}"));
+        if w >= 160 && h >= 120 {
+            cmd.env("MEGAFLASH_MAME_SIZE", format!("{w}x{h}"));
+            cmd.env("MAME_RESOLUTION", format!("{w}x{h}"));
+        }
+    }
 
     let child = cmd.spawn().context("spawn run-megaflash-mame.sh")?;
     {

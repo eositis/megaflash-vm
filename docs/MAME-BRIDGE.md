@@ -1,6 +1,6 @@
 # MAME + Bramble MegaFlash bridge
 
-Operator guide for **megaflash-vm**: link MAME’s Apple //c (rev 4, `apple2c4`) to MegaFlash running under **Bramble**. Slot‑4 soft‑switches `$C0C0–$C0C3` (MegaFlash) and `$C0C4–$C0C7` (Uthernet II / W5100) are forwarded over TCP to Bramble’s Apple-bus injector (`-a2bus-bridge`).
+Operator guide for **megaflash-vm**: link MAME’s Apple //c (rev 4, `apple2c4`) to MegaFlash running under **Bramble**. Slot‑4 `$C0C0–$C0C3` (MegaFlash) is forwarded over TCP into guest BusLoop. `$C0C4–$C0C7` (Uthernet II / W5100) is forwarded on the same socket but **host-completed** in overlay Bramble — guest inject never presented DATA (stayed `0x00`).
 
 **Project split:** stock **Bramble** is a Pico emulator (`-spi-flash*`, no Apple code). This repo builds an **overlay `bramble`** (`cmake -B build && make -C build bramble`) that adds Apple-bus inject + `-a2bus-bridge` + temporary MegaFlash guest stubs. MAME Lua talks to that overlay over TCP.
 
@@ -124,7 +124,7 @@ Client (MAME plugin) → server (Bramble):
 
 Reply: `status` (0 = ok), `data`.
 
-**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. Those cycles are **injected into guest BusLoop** so `U2_HandleBusAccess` runs (socket OPEN/MACRAW/SEND). Overlay lets `U2_Init` run `u2_reset` and `U2_Net_Init` (MonInit / UART monitor still skipped). `U2_Poll` / `U2_Net_Poll` run so DHCP frames reach TAP. Host-completing only the W5100 window was enough for “device found” but left the IP stack dead.
+**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. Guest BusLoop inject did not update chunk-1 registers (DATA stayed `0x00`). The overlay **host-completes** the W5100 window in the same RPC (RTR probe, MACRAW OPEN/SEND, local DHCP `192.168.4.3`) and copies TAP UDP/ARP into the RX ring.
 
 Firmware boots in **Slinky** mode (`registers[2] == 0xf0`). MegaFlash ROM (or the activation read sequence `$C0C2,$C0C0,$C0C0,$C0C3,$C0C1`) switches to native mode; then `$C0C3` ID is **`$96`** (reads toggle with `~` per MegaFlash).
 

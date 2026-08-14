@@ -385,6 +385,15 @@ echo "[mame] pluginspath=$PLUGINPATH"
 # shellcheck disable=SC1091
 source "$ROOT/.run/mame-display.env"
 
+if [[ -n "${MEGAFLASH_MAME_POS:-}" ]]; then
+  export SDL_VIDEO_WINDOW_POS="$MEGAFLASH_MAME_POS"
+  export SDL_VIDEO_CENTERED=0
+  echo "[mame] SDL_VIDEO_WINDOW_POS=$MEGAFLASH_MAME_POS"
+fi
+if [[ -n "${MEGAFLASH_MAME_SIZE:-}" ]]; then
+  export MAME_RESOLUTION="$MEGAFLASH_MAME_SIZE"
+fi
+
 echo "[mame] extras=${MAME_EXTRA_ARGS:-} (video flags below override stale Operator args)"
 # Do not exec: the EXIT trap must kill Bramble when MAME exits.
 set +e

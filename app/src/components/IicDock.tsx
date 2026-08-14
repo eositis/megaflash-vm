@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api } from "../api";
 
@@ -9,24 +9,12 @@ type Props = {
 
 export function IicDock({ running, active }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const [hint, setHint] = useState("");
 
   useEffect(() => {
-    if (!running) {
-      void api
-        .placeMameWindow({ x: 0, y: 0, w: 100, h: 100, visible: false })
-        .catch(() => {});
-      return;
-    }
-
     let cancelled = false;
     const place = async () => {
       if (cancelled || !hostRef.current) return;
-      if (!active) {
-        await api
-          .placeMameWindow({ x: 0, y: 0, w: 100, h: 100, visible: false })
-          .catch(() => {});
-        return;
-      }
       const el = hostRef.current;
       const r = el.getBoundingClientRect();
       if (r.width < 32 || r.height < 32) return;
@@ -37,7 +25,23 @@ export function IicDock({ running, active }: Props) {
       const y = Math.round(inner.y / scale + r.top);
       const w = Math.round(r.width);
       const h = Math.round(r.height);
-      await api.placeMameWindow({ x, y, w, h, visible: true }).catch(() => {});
+      try {
+        await api.placeMameWindow({
+          x,
+          y,
+          w,
+          h,
+          visible: running && active,
+        });
+        if (!cancelled && running && active) setHint("");
+      } catch (e) {
+        if (!cancelled && running && active) {
+          setHint(
+            String(e) +
+              " — MAME stays in its own window if Accessibility is not granted to this Operator binary (MegaFlash Operator.app, or target/debug/megaflash-operator during tauri dev). Grant that app under System Settings → Privacy & Security → Accessibility, then click the Apple //c tab. Launch also sets SDL_VIDEO_WINDOW_POS from this pane."
+          );
+        }
+      }
     };
 
     void place();
@@ -70,11 +74,12 @@ export function IicDock({ running, active }: Props) {
     <div className="iic-dock" ref={hostRef}>
       {!running && (
         <p className="hint">
-          Launch Apple //c to show the emulator in this tab (MAME is positioned
-          over this pane). Grant Accessibility to MegaFlash Operator if the
-          window does not move.
+          Launch Apple //c to show the emulator in this tab. Operator will try
+          to place the MAME window over this pane (Accessibility must stay on
+          for MegaFlash Operator).
         </p>
       )}
+      {running && hint && <p className="hint">{hint}</p>}
       {running && !active && (
         <p className="hint">Apple //c is running — select this tab to show it.</p>
       )}

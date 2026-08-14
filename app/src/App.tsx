@@ -495,6 +495,11 @@ function App() {
                 disabled={busy || status.mameRunning}
                 onClick={() =>
                   void run(async () => {
+                    setRightTab("iic");
+                    await new Promise<void>((r) =>
+                      requestAnimationFrame(() => requestAnimationFrame(() => r()))
+                    );
+                    await new Promise((r) => setTimeout(r, 80));
                     await api.stopPicoAndStartMame();
                     setMsg(
                       status.picoRunning
@@ -590,6 +595,7 @@ function App() {
               Apple //c
             </button>
           </div>
+          <div className="pane-stack">
           <div
             className={rightTab === "console" ? "pane-body" : "pane-body hidden"}
             role="tabpanel"
@@ -603,6 +609,7 @@ function App() {
             role="tabpanel"
           >
             <IicDock running={status.mameRunning} active={rightTab === "iic"} />
+          </div>
           </div>
         </main>
       </div>

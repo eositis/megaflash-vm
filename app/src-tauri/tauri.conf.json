@@ -28,6 +28,7 @@
     "targets": "all",
     "macOS": {
       "entitlements": "entitlements/entitlements.plist",
+      "infoPlist": "Info.plist",
       "exceptionDomain": "",
       "frameworks": [],
       "providerShortName": null,
