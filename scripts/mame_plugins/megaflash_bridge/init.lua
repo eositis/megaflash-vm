@@ -1,6 +1,6 @@
 -- license:BSD-3-Clause
--- Forward Apple //c memexp soft-switches ($C0C0-$C0C3) to Bramble's
--- MegaFlash a2bus TCP bridge.
+-- Forward Apple //c slot-4 soft-switches ($C0C0-$C0C7) to Bramble's
+-- MegaFlash a2bus TCP bridge. $C0C0-$C0C3 = MegaFlash, $C0C4-$C0C7 = Uthernet II.
 --
 -- IMPORTANT: open the TCP socket as a *client* only (READ|WRITE, no CREATE).
 -- With CREATE, MAME falls back to listen-on-same-port when connect fails, which
@@ -9,8 +9,8 @@
 
 	local exports = {
 	name = "megaflash_bridge",
-	version = "0.1.9",
-	description = "Bramble MegaFlash $C0C0-$C0C3 TCP bridge",
+	version = "0.1.10",
+	description = "Bramble MegaFlash $C0C0-$C0C7 TCP bridge (MegaFlash + Uthernet II)",
 	license = "BSD-3-Clause",
 	author = { name = "eositis" }
 }
@@ -132,9 +132,9 @@ function plugin.startplugin()
 	local function nibble_from_offset(offset)
 		local addr = offset
 		if addr < 0x100 then
-			addr = 0xc0c0 + (addr & 0x3)
+			addr = 0xc0c0 + (addr & 0xf)
 		end
-		return addr & 0x3, addr
+		return addr & 0xf, addr
 	end
 
 	local function apply_video_prefs()
@@ -222,7 +222,7 @@ function plugin.startplugin()
 			logf("NSC muted on $C100-$CFFF (use MegaFlash clock)")
 		end
 
-		taps.read = space:install_read_tap(0xc0c0, 0xc0c3, "megaflash_r",
+		taps.read = space:install_read_tap(0xc0c0, 0xc0c7, "megaflash_r",
 			function(offset, data, mask)
 				if not ensure_sock() then
 					return data
@@ -241,7 +241,7 @@ function plugin.startplugin()
 				return data
 			end)
 
-		taps.write = space:install_write_tap(0xc0c0, 0xc0c3, "megaflash_w",
+		taps.write = space:install_write_tap(0xc0c0, 0xc0c7, "megaflash_w",
 			function(offset, data, mask)
 				if not ensure_sock() then
 					return

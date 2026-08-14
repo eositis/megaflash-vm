@@ -1,10 +1,45 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import {
+  currentMonitor,
+  getCurrentWindow,
+  LogicalSize,
+} from "@tauri-apps/api/window";
 import { api } from "./api";
 import type { NetHelperStatus, SessionStatus, Settings } from "./types";
 import { ConsoleView } from "./components/ConsoleView";
 import "./App.css";
+
+function loadCollapsed(key: string, fallback: boolean): boolean {
+  try {
+    const v = localStorage.getItem(key);
+    if (v === "1") return true;
+    if (v === "0") return false;
+  } catch {
+    /* ignore */
+  }
+  return fallback;
+}
+
+async function capWindowToScreen(): Promise<void> {
+  const win = getCurrentWindow();
+  const mon = await currentMonitor();
+  if (!mon) return;
+  const scale = mon.scaleFactor || 1;
+  const maxW = Math.max(640, Math.floor(mon.size.width / scale));
+  const maxH = Math.max(480, Math.floor(mon.size.height / scale));
+  const minW = Math.min(640, maxW);
+  const minH = Math.min(480, maxH);
+  await win.setMinSize(new LogicalSize(minW, minH));
+  await win.setMaxSize(new LogicalSize(maxW, maxH));
+  const inner = await win.innerSize();
+  const w = Math.min(inner.width / scale, maxW);
+  const h = Math.min(inner.height / scale, maxH);
+  if (w < inner.width / scale - 0.5 || h < inner.height / scale - 0.5) {
+    await win.setSize(new LogicalSize(Math.floor(w), Math.floor(h)));
+  }
+}
 
 function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -13,6 +48,8 @@ function App() {
   const [error, setError] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
+  const [picoOpen, setPicoOpen] = useState(() => !loadCollapsed("op.picoCollapsed", true));
+  const [iicOpen, setIicOpen] = useState(() => !loadCollapsed("op.iicCollapsed", true));
 
   const refresh = async () => {
     // Sequential invokes — avoid overlapping sync IPC on the UI thread.
@@ -45,6 +82,7 @@ function App() {
         /* optional */
       }
     })();
+    void capWindowToScreen().catch(() => {});
     const u1 = listen<SessionStatus>("session-status", (ev) => setStatus(ev.payload));
     return () => {
       void u1.then((f) => f());
@@ -106,7 +144,25 @@ function App() {
       <div className="layout">
         <aside className="panel">
           <section>
-            <h2>1 · Pico setup</h2>
+            <button
+              type="button"
+              className="section-toggle"
+              aria-expanded={picoOpen}
+              onClick={() => {
+                const next = !picoOpen;
+                setPicoOpen(next);
+                try {
+                  localStorage.setItem("op.picoCollapsed", next ? "0" : "1");
+                } catch {
+                  /* ignore */
+                }
+              }}
+            >
+              <h2>1 · Pico setup</h2>
+              <span className="chevron">{picoOpen ? "▾" : "▸"}</span>
+            </button>
+            {picoOpen && (
+            <div className="section-body">
             <label>
               Firmware (UF2)
               <div className="row">
@@ -248,6 +304,9 @@ function App() {
               </>
             )}
 
+            </div>
+            )}
+
             <div className="row actions">
               <button
                 type="button"
@@ -316,7 +375,25 @@ function App() {
           </section>
 
           <section>
-            <h2>2 · Apple //c + MegaFlash</h2>
+            <button
+              type="button"
+              className="section-toggle"
+              aria-expanded={iicOpen}
+              onClick={() => {
+                const next = !iicOpen;
+                setIicOpen(next);
+                try {
+                  localStorage.setItem("op.iicCollapsed", next ? "0" : "1");
+                } catch {
+                  /* ignore */
+                }
+              }}
+            >
+              <h2>2 · Apple //c + MegaFlash</h2>
+              <span className="chevron">{iicOpen ? "▾" : "▸"}</span>
+            </button>
+            {iicOpen && (
+            <div className="section-body">
             <label>
               MegaFlash ROM (iic.bin)
               <div className="row">
@@ -400,6 +477,8 @@ function App() {
               if it is running, then starts overlay Bramble with the Apple-bus
               bridge plus MAME.
             </p>
+            </div>
+            )}
             <div className="row actions">
               <button
                 type="button"

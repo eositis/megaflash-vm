@@ -1,8 +1,8 @@
 {
   "plugin": {
     "name": "megaflash_bridge",
-    "description": "Forward Apple IIc $C0C0-$C0C3 to Bramble MegaFlash over TCP",
-    "version": "0.1.9",
+    "description": "Forward Apple IIc $C0C0-$C0C7 (MegaFlash + Uthernet II) to Bramble over TCP",
+    "version": "0.1.10",
     "author": "eositis",
     "type": "plugin",
     "start": "true"

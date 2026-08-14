@@ -1,6 +1,6 @@
 # MAME + Bramble MegaFlash bridge
 
-Operator guide for **megaflash-vm**: link MAME’s Apple //c (rev 4, `apple2c4`) to MegaFlash running under **Bramble**. Slot‑4 soft‑switches `$C0C0–$C0C3` are forwarded over TCP to Bramble’s Apple-bus injector (`-a2bus-bridge`).
+Operator guide for **megaflash-vm**: link MAME’s Apple //c (rev 4, `apple2c4`) to MegaFlash running under **Bramble**. Slot‑4 soft‑switches `$C0C0–$C0C3` (MegaFlash) and `$C0C4–$C0C7` (Uthernet II / W5100) are forwarded over TCP to Bramble’s Apple-bus injector (`-a2bus-bridge`).
 
 **Project split:** stock **Bramble** is a Pico emulator (`-spi-flash*`, no Apple code). This repo builds an **overlay `bramble`** (`cmake -B build && make -C build bramble`) that adds Apple-bus inject + `-a2bus-bridge` + temporary MegaFlash guest stubs. MAME Lua talks to that overlay over TCP.
 
@@ -31,7 +31,7 @@ What it does:
 
 1. Starts Bramble (`BRAMBLE_ROOT`, default `../Bramble`) with `-arch m33 -clock 150 -cores 2 -wifi -tap -a2bus-bridge 19765` and `scripts/megaflash-mame.stub` (PHI0; BusLoop launched after radio).
 2. Waits for a TCP `PING` on `127.0.0.1:19765` and BusLoop ready.
-3. Starts `mame apple2c4` with `-plugin megaflash_bridge` (Lua taps on `$C0C0–$C0C3`).
+3. Starts `mame apple2c4` with `-plugin megaflash_bridge` (Lua taps on `$C0C0–$C0C7`).
 
 **Do not** pass `-ramsize` above the default **128K**. Extra RAM enables MAME’s built-in Slinky and conflicts with MegaFlash.
 
@@ -118,11 +118,13 @@ Client (MAME plugin) → server (Bramble):
 |----|-------|---------|
 | `0x00` | op | PING |
 | `0x01` | op | PHI0 pulse |
-| `0x02` | op, nibble | Inject READ `$C0C0+nibble`; return **pre-cycle** register shadow (bus byte Apple sees) |
-| `0x03` | op, nibble, data | Inject WRITE |
+| `0x02` | op, nibble | Inject READ `$C0C0+nibble`; MegaFlash (0–3) returns **pre-cycle** shadow; Uthernet II (4–7) is host W5100 |
+| `0x03` | op, nibble, data | Inject WRITE (U2 4–7 host-completed; no guest pump) |
 | `0x04` | op, nibble | PEEK register shadow (no bus inject) |
 
 Reply: `status` (0 = ok), `data`.
+
+**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. The overlay **host-completes** those nibbles as a W5100 indirect window (MR / addr / data, default RTR `$07/$D0`, RMSR `$06`, SHAR `00:08:DC:A2:A2:A2`) so ip65’s RTR XOR probe succeeds. Guest `U2_Init` still runs `u2_reset` (MonInit/Net_Init skipped). MACRAW/DHCP still needs guest `U2_Net_Init`/`U2_Net_Poll` without stalling LoadAllConfigs.
 
 Firmware boots in **Slinky** mode (`registers[2] == 0xf0`). MegaFlash ROM (or the activation read sequence `$C0C2,$C0C0,$C0C0,$C0C3,$C0C1`) switches to native mode; then `$C0C3` ID is **`$96`** (reads toggle with `~` per MegaFlash).
 
