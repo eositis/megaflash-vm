@@ -36,16 +36,13 @@ export function IicDock({ running, active }: Props) {
         if (!cancelled && running && active) setHint("");
       } catch (e) {
         if (!cancelled && running && active) {
-          setHint(
-            String(e) +
-              " — Could not overlay MAME on this pane. Check ~/Library/Logs/MegaFlashOperator/mame-win.log. Accessibility must be on for MegaFlash Operator (already required); SDL still draws its own title bar."
-          );
+          setHint(String(e));
         }
       }
     };
 
     void place();
-    const t = window.setInterval(() => void place(), 750);
+    const t = window.setInterval(() => void place(), 2500);
     const win = getCurrentWindow();
     let unMove: (() => void) | undefined;
     let unResize: (() => void) | undefined;
@@ -74,9 +71,9 @@ export function IicDock({ running, active }: Props) {
     <div className="iic-dock" ref={hostRef}>
       {!running && (
         <p className="hint">
-          Launch Apple //c to show the emulator in this tab. Operator will try
-          to place the MAME window over this pane (Accessibility must stay on
-          for MegaFlash Operator).
+          Launch Apple //c to run MAME. Operator opens it over this pane
+          (SDL position). MAME keeps its own title bar — it is not an embedded
+          view. Do not re-toggle Accessibility; Operator will not prompt.
         </p>
       )}
       {running && hint && <p className="hint">{hint}</p>}

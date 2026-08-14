@@ -1,18 +1,20 @@
 //! Overlay the MAME window on Operator's Apple //c pane (macOS).
 //!
-//! System Events via `osascript` does not inherit this app's Accessibility TCC
-//! grant. Move/resize with in-process AXUIElement APIs instead.
+//! Never call AXIsProcessTrustedWithOptions(prompt=true) from the place timer:
+//! that re-prompts even when Settings already shows Accessibility ON (ad-hoc
+//! signed rebuilds look like a new binary to TCC).
 use core_foundation::base::{CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
-use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::raw::{c_int, c_void};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 static LAST_GEOM: Mutex<Option<(i32, i32, i32, i32)>> = Mutex::new(None);
+static LOGGED_UNTRUSTED: AtomicBool = AtomicBool::new(false);
 
 const AX_OK: c_int = 0;
 const AX_VALUE_CGPOINT: u32 = 1;
@@ -49,7 +51,7 @@ extern "C" {
         value: CFTypeRef,
     ) -> c_int;
     fn AXValueCreate(typ: u32, value_ptr: *const c_void) -> AXValueRef;
-    fn AXIsProcessTrustedWithOptions(options: CFTypeRef) -> u8;
+    fn AXIsProcessTrusted() -> u8;
     fn CFRelease(cf: CFTypeRef);
     fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFArrayGetCount(the_array: CFTypeRef) -> isize;
@@ -99,16 +101,8 @@ fn pgrep_mame_pid() -> Option<u32> {
     None
 }
 
-fn prompt_ax() {
-    let key = CFString::new("AXTrustedCheckOptionPrompt");
-    let pairs = &[(
-        key.as_CFType(),
-        CFBoolean::true_value().as_CFType(),
-    )];
-    let opts = CFDictionary::from_CFType_pairs(pairs);
-    unsafe {
-        AXIsProcessTrustedWithOptions(opts.as_concrete_TypeRef() as CFTypeRef);
-    }
+fn ax_trusted() -> bool {
+    unsafe { AXIsProcessTrusted() != 0 }
 }
 
 fn cfstr(s: &str) -> CFString {
@@ -183,7 +177,7 @@ fn first_ax_window(app: AXUIElementRef) -> Result<AXUIElementRef, String> {
         AXUIElementCopyAttributeValue(app, name.as_concrete_TypeRef() as CFTypeRef, &mut out)
     };
     if err != AX_OK || out.is_null() {
-        return Err(format!("AXWindows err={err} (SDL may not expose AX yet)"));
+        return Err(format!("AXWindows err={err}"));
     }
     let n = unsafe { CFArrayGetCount(out) };
     if n <= 0 {
@@ -202,55 +196,55 @@ fn first_ax_window(app: AXUIElementRef) -> Result<AXUIElementRef, String> {
     Ok(win)
 }
 
+/// Save pane geometry for SDL_VIDEO_WINDOW_POS. Overlay via AX only when
+/// already trusted — never prompt.
 pub fn place_mame_window(x: i32, y: i32, w: i32, h: i32, visible: bool) -> Result<(), String> {
     remember_geom(x, y, w, h);
     let Some(pid) = pgrep_mame_pid() else {
-        if visible {
-            return Err("no mame/apple2c4 process".into());
-        }
         return Ok(());
     };
-    prompt_ax();
+    if !ax_trusted() {
+        if !LOGGED_UNTRUSTED.swap(true, Ordering::Relaxed) {
+            log_line(
+                "AXIsProcessTrusted=false (no prompt). Using SDL_VIDEO_WINDOW_POS only.",
+            );
+        }
+        return Ok(());
+    }
     let app = unsafe { AXUIElementCreateApplication(pid as i32) };
     if app.is_null() {
-        return Err(format!("AXUIElementCreateApplication({pid}) failed"));
+        return Ok(());
     }
-    ax_set_bool(app, "AXHidden", !visible);
     if !visible {
+        ax_set_bool(app, "AXHidden", true);
         unsafe { CFRelease(app as CFTypeRef) };
         return Ok(());
     }
-    ax_set_bool(app, "AXFrontmost", true);
+    ax_set_bool(app, "AXHidden", false);
     let win = match first_ax_window(app) {
         Ok(w) => w,
         Err(e) => {
             unsafe { CFRelease(app as CFTypeRef) };
             log_line(&format!("pid {pid}: {e}"));
-            return Err(e);
+            return Ok(());
         }
     };
-    let pos = ax_set_point(win, x as f64, y as f64);
-    let siz = ax_set_size(win, w as f64, h as f64);
+    let _ = ax_set_point(win, x as f64, y as f64);
+    let _ = ax_set_size(win, w as f64, h as f64);
     unsafe {
         CFRelease(win);
         CFRelease(app as CFTypeRef);
     }
-    match (pos, siz) {
-        (Ok(()), Ok(())) => {
-            log_line(&format!("pid {pid} AX -> {x},{y} {w}x{h}"));
-            Ok(())
-        }
-        (Err(a), Ok(())) => Err(a),
-        (Ok(()), Err(b)) => Err(b),
-        (Err(a), Err(b)) => Err(format!("{a}; {b}")),
-    }
+    Ok(())
 }
 
 pub fn hide_mame_windows() -> Result<(), String> {
     let Some(pid) = pgrep_mame_pid() else {
         return Ok(());
     };
-    prompt_ax();
+    if !ax_trusted() {
+        return Ok(());
+    }
     let app = unsafe { AXUIElementCreateApplication(pid as i32) };
     if app.is_null() {
         return Ok(());
