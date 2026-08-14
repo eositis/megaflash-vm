@@ -152,15 +152,15 @@ static uint8_t read_at(uint16_t a)
     return u2_mem[a];
 }
 
-static void rx_push(const uint8_t *frame, uint16_t len)
+static int rx_push(const uint8_t *frame, uint16_t len)
 {
     if (!ready || rx_size == 0 || !frame || len == 0)
-        return;
+        return 0;
     uint16_t total = (uint16_t)(2u + len);
     uint16_t used = rx_used();
     uint16_t freeb = (uint16_t)(rx_size - used);
     if (total >= rx_size || freeb <= total)
-        return;
+        return 0;
     uint16_t mask = (uint16_t)(rx_size - 1u);
     uint16_t wr = rx_wr;
     uint16_t wire = (uint16_t)(len + 2u);
@@ -173,6 +173,7 @@ static void rx_push(const uint8_t *frame, uint16_t len)
         wr++;
     }
     rx_wr = wr;
+    return 1;
 }
 
 static uint16_t ipv4_csum(const uint8_t *ip, int len)
@@ -469,20 +470,20 @@ int host_u2_write(uint8_t nibble, uint8_t wdata)
     }
 }
 
-void host_u2_on_tap_frame(const uint8_t *eth, int len)
+int host_u2_on_tap_frame(const uint8_t *eth, int len)
 {
     if (!ready || !eth || len < 14)
-        return;
+        return 1;
     if (u2_mem[W5100_S0 + SN_SR] != SN_SR_MACRAW)
-        return;
+        return 1;
     uint8_t mf = u2_mem[W5100_S0 + SN_MR] & 0x40u;
     if (mf) {
         int bcast = (eth[0] & eth[1] & eth[2] & eth[3] & eth[4] & eth[5]) == 0xFF;
         int ours = memcmp(eth, &u2_mem[0x09], 6) == 0;
         if (!bcast && !ours)
-            return;
+            return 1;
     }
-    rx_push(eth, (uint16_t)len);
+    return rx_push(eth, (uint16_t)len);
 }
 
 void host_u2_poll(void)

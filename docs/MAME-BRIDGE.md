@@ -124,7 +124,7 @@ Client (MAME plugin) → server (Bramble):
 
 Reply: `status` (0 = ok), `data`.
 
-**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. Overlay host-completes the W5100 window. Local DHCP is Ethernet+IP broadcast with `yiaddr=192.168.4.3`. DNS is userspace UDP NAT. **TCP (telnet) is userspace TCP NAT** — utun is point-to-point to Pico `192.168.4.2` only, so SYN to the internet never returned.
+**Uthernet II / Telnet65 / wget:** Lua taps `$C0C4–$C0C7`. Overlay host-completes the W5100 window. Local DHCP is Ethernet+IP broadcast with `yiaddr=192.168.4.3`. DNS is userspace UDP NAT. **TCP is userspace TCP NAT** — utun is point-to-point to Pico `192.168.4.2` only, so SYN to the internet never returned. W5100 socket0 RX is 4KB; NAT must not `recv()` faster than Contiki can RECV (wget also writes MegaFlash). Sniff returns 0 when RX is full; TAP holds the segment and logs `[TAP] TCP NAT pause (W5100 RX full)`.
 
 Firmware boots in **Slinky** mode (`registers[2] == 0xf0`). MegaFlash ROM (or the activation read sequence `$C0C2,$C0C0,$C0C0,$C0C3,$C0C1`) switches to native mode; then `$C0C3` ID is **`$96`** (reads toggle with `~` per MegaFlash).
 
