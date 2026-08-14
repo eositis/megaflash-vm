@@ -124,7 +124,7 @@ Client (MAME plugin) → server (Bramble):
 
 Reply: `status` (0 = ok), `data`.
 
-**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. Guest BusLoop inject did not update chunk-1 registers (DATA stayed `0x00`). The overlay **host-completes** the W5100 window in the same RPC (RTR probe, MACRAW OPEN/SEND, local DHCP `192.168.4.3`) and copies TAP UDP/ARP into the RX ring.
+**Uthernet II / Telnet65:** Lua taps `$C0C4–$C0C7`. Guest BusLoop inject did not update chunk-1 registers (DATA stayed `0x00`). The overlay **host-completes** the W5100 window in the same RPC (RTR probe, MACRAW OPEN/SEND). Local DHCP OFFER/ACK is **Ethernet+IP broadcast** with `yiaddr=192.168.4.3` — ip65 still has `0.0.0.0` during DISCOVER, so a unicast OFFER is dropped and Telnet65 stays on “Obtaining IP address”. TAP UDP/ARP is sniffed into the RX ring.
 
 Firmware boots in **Slinky** mode (`registers[2] == 0xf0`). MegaFlash ROM (or the activation read sequence `$C0C2,$C0C0,$C0C0,$C0C3,$C0C1`) switches to native mode; then `$C0C3` ID is **`$96`** (reads toggle with `~` per MegaFlash).
 

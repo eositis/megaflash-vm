@@ -38,7 +38,7 @@ export function IicDock({ running, active }: Props) {
         if (!cancelled && running && active) {
           setHint(
             String(e) +
-              " — MAME stays in its own window if Accessibility is not granted to this Operator binary (MegaFlash Operator.app, or target/debug/megaflash-operator during tauri dev). Grant that app under System Settings → Privacy & Security → Accessibility, then click the Apple //c tab. Launch also sets SDL_VIDEO_WINDOW_POS from this pane."
+              " — Could not overlay MAME on this pane. Check ~/Library/Logs/MegaFlashOperator/mame-win.log. Accessibility must be on for MegaFlash Operator (already required); SDL still draws its own title bar."
           );
         }
       }

@@ -98,8 +98,17 @@ static void chip_reset(void)
 
 static void autoinc(void)
 {
-    if (u2_mr & W5100_MR_AI)
-        u2_addr = (uint16_t)((u2_addr + 1u) & 0x7FFFu);
+    if (!(u2_mr & W5100_MR_AI))
+        return;
+    uint16_t next = (uint16_t)(u2_addr + 1u);
+    /* W5100 8K windows: TX 0x4000–0x5FFF, RX 0x6000–0x7FFF. */
+    if (u2_addr >= W5100_TX_BASE && u2_addr < W5100_RX_BASE && next >= W5100_RX_BASE)
+        next = W5100_TX_BASE;
+    else if (u2_addr >= W5100_RX_BASE && next >= W5100_MEM_SIZE)
+        next = W5100_RX_BASE;
+    else
+        next &= 0x7FFFu;
+    u2_addr = next;
 }
 
 static uint16_t rx_used(void)
@@ -186,7 +195,8 @@ static void dhcp_reply(const uint8_t *req, int req_len, uint8_t msg)
     const uint8_t *bootp = req + 14 + 20 + 8;
     uint8_t frame[590];
     memset(frame, 0, sizeof(frame));
-    memcpy(frame, req + 6, 6);
+    /* ip65 still has 0.0.0.0 until ACK — unicast OFFER to 192.168.4.3 is dropped. */
+    memset(frame, 0xFF, 6);
     static const uint8_t gw[6] = {0x02, 0xCA, 0xFE, 0xBA, 0xBE, 0x01};
     memcpy(frame + 6, gw, 6);
     frame[12] = 0x08;
@@ -199,10 +209,10 @@ static void dhcp_reply(const uint8_t *req, int req_len, uint8_t msg)
     ip[13] = 168;
     ip[14] = 4;
     ip[15] = 1;
-    ip[16] = 192;
-    ip[17] = 168;
-    ip[18] = 4;
-    ip[19] = 3;
+    ip[16] = 255;
+    ip[17] = 255;
+    ip[18] = 255;
+    ip[19] = 255;
     uint8_t *udp = ip + 20;
     udp[0] = 0;
     udp[1] = 67;
@@ -213,6 +223,7 @@ static void dhcp_reply(const uint8_t *req, int req_len, uint8_t msg)
     bp[1] = 1;
     bp[2] = 6;
     memcpy(bp + 4, bootp + 4, 4); /* xid */
+    bp[10] = 0x80; /* broadcast flag — matches ip65 DISCOVER */
     bp[16] = 192;
     bp[17] = 168;
     bp[18] = 4;
@@ -272,8 +283,8 @@ static void dhcp_reply(const uint8_t *req, int req_len, uint8_t msg)
     ip[10] = (uint8_t)(c >> 8);
     ip[11] = (uint8_t)c;
     rx_push(frame, (uint16_t)(14 + ip_len));
-    fprintf(stderr, "[A2Bus] U2 DHCP %s → 192.168.4.3\n",
-            msg == 2 ? "OFFER" : "ACK");
+    fprintf(stderr, "[A2Bus] U2 DHCP %s broadcast yiaddr=192.168.4.3 (%d bytes)\n",
+            msg == 2 ? "OFFER" : "ACK", 14 + ip_len);
 }
 
 static int dhcp_msg_type(const uint8_t *bootp, int bootp_len)
