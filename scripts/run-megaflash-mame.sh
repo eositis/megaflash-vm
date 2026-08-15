@@ -30,6 +30,7 @@ PLUGINPATH="$ROOT/scripts/mame_plugins"
 MAME_STOCK_PLUGINS="${MAME_STOCK_PLUGINS:-}"
 if [[ -z "$MAME_STOCK_PLUGINS" ]]; then
   for d in \
+    "$HOME/Library/Application Support/MegaFlashOperator/mame/plugins" \
     /opt/homebrew/share/mame/plugins \
     /opt/homebrew/Cellar/mame/*/share/mame/plugins \
     /usr/local/share/mame/plugins
@@ -47,7 +48,8 @@ if [[ -n "$MAME_STOCK_PLUGINS" ]]; then
   PLUGINPATH="$PLUGINPATH;$MAME_STOCK_PLUGINS"
 fi
 MAME_BIN="${MAME:-mame}"
-LOCAL_ROMS="${MAME_LOCAL_ROMS:-$ROOT/roms}"
+DATA="${MEGAFLASH_DATA_DIR:-$ROOT}"
+LOCAL_ROMS="${MAME_LOCAL_ROMS:-$DATA/roms}"
 AMPLE_ROMS="${AMPLE_ROMS:-$HOME/Library/Application Support/Ample/roms}"
 STAGE_DIR="$LOCAL_ROMS/apple2c4"
 VOX_DIR="$LOCAL_ROMS/votrsc01a"
@@ -183,7 +185,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # SPI backing files live in this project (outside the GPIO).
-FLASH_DIR="${MEGAFLASH_FLASH_DIR:-$ROOT/flash}"
+FLASH_DIR="${MEGAFLASH_FLASH_DIR:-$DATA/flash}"
 mkdir -p "$FLASH_DIR"
 SPI_FLASH1="${SPI_FLASH1:-$FLASH_DIR/spi-flash1.bin}"
 SPI_FLASH2="${SPI_FLASH2:-$FLASH_DIR/spi-flash2.bin}"
@@ -219,7 +221,7 @@ fi
 run_bramble() {
   # cwd = this repo so relative flash/megaflash-user-config.bin resolves here.
   (
-    cd "$ROOT"
+    cd "$DATA"
     exec env BRAMBLE_ESCALATED="${BRAMBLE_ESCALATED:-}" \
       "$BRAMBLE" "$UF2" \
       -arch m33 \
@@ -260,7 +262,7 @@ if [[ "$HOST_NET" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
     BRAMBLE_PID=$!
     BRAMBLE_ELEVATED=0
   else
-    RUN_DIR="$ROOT/.run"
+    RUN_DIR="${MEGAFLASH_RUN_DIR:-$DATA/.run}"
     mkdir -p "$RUN_DIR"
     RUNNER="$RUN_DIR/start-bramble-hostnet.sh"
     {
@@ -270,7 +272,7 @@ if [[ "$HOST_NET" -eq 1 ]] && [[ "$(uname -s)" == "Darwin" ]]; then
       echo "export BRAMBLE_ROOT=$(printf '%q' "$BRAMBLE_ROOT")"
       echo "export PATH=$(printf '%q' "$PATH")"
       echo "$(printf '%q' "$HOST_NET_PREP") enable || true"
-      echo "cd $(printf '%q' "$ROOT")"
+      echo "cd $(printf '%q' "$DATA")"
       printf 'exec'
       printf ' %q' "$BRAMBLE" "$UF2" \
         -arch m33 -clock 150 -cores 2 \
@@ -383,7 +385,7 @@ echo "[mame] pluginspath=$PLUGINPATH"
 
 "$PYTHON3" "$ROOT/scripts/apply-mame-display.py" "$ROOT"
 # shellcheck disable=SC1091
-source "$ROOT/.run/mame-display.env"
+source "${MEGAFLASH_RUN_DIR:-$DATA/.run}/mame-display.env"
 
 if [[ -n "${MEGAFLASH_MAME_POS:-}" ]]; then
   export SDL_VIDEO_WINDOW_POS="$MEGAFLASH_MAME_POS"

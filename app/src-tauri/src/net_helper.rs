@@ -46,10 +46,13 @@ pub fn status() -> NetHelperStatus {
 
 pub fn install(vm_root: &str) -> Result<NetHelperStatus> {
     let root = PathBuf::from(vm_root);
-    let pf = root
-        .join("../Bramble/scripts/macos-cyw43-pf-nat.sh")
-        .canonicalize()
-        .unwrap_or_else(|_| root.join("../Bramble/scripts/macos-cyw43-pf-nat.sh"));
+    let mut pf = root.join("scripts/macos-cyw43-pf-nat.sh");
+    if !pf.is_file() {
+        pf = root
+            .join("../Bramble/scripts/macos-cyw43-pf-nat.sh")
+            .canonicalize()
+            .unwrap_or_else(|_| root.join("../Bramble/scripts/macos-cyw43-pf-nat.sh"));
+    }
     if !pf.is_file() {
         bail!("pf helper missing: {}", pf.display());
     }

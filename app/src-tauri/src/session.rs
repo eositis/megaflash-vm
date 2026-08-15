@@ -1,4 +1,4 @@
-use crate::settings::{resolve_bramble, Settings};
+use crate::settings::{resolve_bramble, writable_data_dir, packaged_runtime, Settings};
 use crate::xmodem;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -185,17 +185,44 @@ fn resolve_python3() -> PathBuf {
 }
 
 fn resolve_mame_bin() -> Option<PathBuf> {
+    let as_mame = writable_data_dir().join("mame/mame");
     for p in [
-        "/opt/homebrew/bin/mame",
-        "/usr/local/bin/mame",
-        "/opt/homebrew/sbin/mame",
+        as_mame.to_str().unwrap_or("").to_string(),
+        "/opt/homebrew/bin/mame".into(),
+        "/usr/local/bin/mame".into(),
+        "/opt/homebrew/sbin/mame".into(),
     ] {
-        let pb = PathBuf::from(p);
+        if p.is_empty() {
+            continue;
+        }
+        let pb = PathBuf::from(&p);
         if pb.is_file() {
             return Some(pb);
         }
     }
     None
+}
+
+fn bramble_cwd(settings: &Settings) -> PathBuf {
+    if packaged_runtime().is_some() {
+        writable_data_dir()
+    } else {
+        PathBuf::from(&settings.megaflash_vm_root)
+    }
+}
+
+fn apply_runtime_env(cmd: &mut Command) {
+    let data = writable_data_dir();
+    if packaged_runtime().is_some() {
+        cmd.env("MEGAFLASH_DATA_DIR", &data);
+        cmd.env("MEGAFLASH_FLASH_DIR", data.join("flash"));
+        cmd.env("MEGAFLASH_RUN_DIR", data.join(".run"));
+        cmd.env("MAME_LOCAL_ROMS", data.join("roms"));
+    }
+    let plugins = data.join("mame/plugins");
+    if plugins.join("boot.lua").is_file() {
+        cmd.env("MAME_STOCK_PLUGINS", plugins);
+    }
 }
 
 /// Kill orphaned `bramble … -usb-console pty:<path>` processes left after an
@@ -488,10 +515,11 @@ pub fn start_pico(app: AppHandle, state: &Arc<SessionState>) -> Result<()> {
         .args(spi_args(&settings))
         .arg("-timeout")
         .arg("7200")
-        .current_dir(&root)
+        .current_dir(bramble_cwd(&settings))
         .stdin(Stdio::null())
         .stdout(stdout)
         .stderr(stderr);
+    apply_runtime_env(&mut cmd);
 
     let child = cmd.spawn().context("spawn bramble (pico console)")?;
     {
@@ -799,6 +827,7 @@ pub fn start_mame_stack(app: AppHandle, state: &SessionState) -> Result<()> {
     let mut cmd = Command::new("bash");
     cmd.process_group(0);
     prepend_gui_path(&mut cmd);
+    apply_runtime_env(&mut cmd);
     if let Some(mame) = resolve_mame_bin() {
         cmd.env("MAME", mame);
     }

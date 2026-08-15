@@ -6,7 +6,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BRAMBLE_ROOT="${BRAMBLE_ROOT:-$ROOT/../Bramble}"
-PF_SCRIPT="${PF_SCRIPT:-$BRAMBLE_ROOT/scripts/macos-cyw43-pf-nat.sh}"
+if [[ -z "${PF_SCRIPT:-}" ]]; then
+  if [[ -x "$ROOT/scripts/macos-cyw43-pf-nat.sh" ]]; then
+    PF_SCRIPT="$ROOT/scripts/macos-cyw43-pf-nat.sh"
+  else
+    PF_SCRIPT="$BRAMBLE_ROOT/scripts/macos-cyw43-pf-nat.sh"
+  fi
+fi
 
 if [[ ! -x "$PF_SCRIPT" ]]; then
   echo "pf helper not found: $PF_SCRIPT" >&2

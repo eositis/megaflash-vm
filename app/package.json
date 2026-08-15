@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "stage-runtime": "bash ../scripts/stage-operator-runtime.sh",
     "preview": "vite preview",
     "tauri": "tauri"
   },

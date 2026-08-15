@@ -89,12 +89,13 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 
 ## Work to make packaging real (phased)
 
-**P0 — packaged runtime (no MAME in the DMG)**  
-- Tauri `bundle.resources` (or a `beforeBuild` copy) for overlay bramble + `runtime/` tree.  
-- `default_vm_root()` → `resource_dir()/runtime` when packaged.  
-- Vendor pf-nat into that tree; helper install must not require `../Bramble`.  
-- `run-megaflash-mame.sh`: honor `MAME_STOCK_PLUGINS` from Application Support; do not hard-fail only on Homebrew paths.  
-- Codesign + notarize (required for a non-dev Mac). Entitlements already disable sandbox.
+**P0 — packaged runtime (implemented 2026-08-15)**  
+- `scripts/stage-operator-runtime.sh` copies overlay bramble, UF2, `iic.bin`, launch scripts, Lua plugin, vendored `macos-cyw43-pf-nat.sh` into `app/src-tauri/runtime/` (gitignored).  
+- Tauri `bundle.resources` embeds that tree; packaged `default_vm_root()` is `Contents/Resources/runtime`.  
+- Writable flash/roms/`.run` live under `~/Library/Application Support/MegaFlashOperator/`.  
+- Network helper install uses `runtime/scripts/macos-cyw43-pf-nat.sh` (no `../Bramble`).  
+- `MAME_STOCK_PLUGINS` also searches Application Support `mame/plugins`.  
+- Notarize still needs an Apple Developer ID (not done in P0).
 
 **P1 — MAME missing UX**  
 - Detect / prompt / download-or-brew as above. Persist `mamePath` + `mamePluginsPath` in `settings.json`.  

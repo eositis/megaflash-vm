@@ -18,7 +18,7 @@ SETTINGS = (
     / "Library/Application Support/MegaFlashOperator/settings.json"
 )
 CFG_SRC = ROOT / "scripts/mame_cfg/apple2c4.cfg"
-RUN = ROOT / ".run"
+RUN = Path(os.environ.get("MEGAFLASH_RUN_DIR", str(ROOT / ".run")))
 CFG_DIR = RUN / "mame_cfg"
 CFG = CFG_DIR / "apple2c4.cfg"
 ENV_OUT = RUN / "mame-display.env"
