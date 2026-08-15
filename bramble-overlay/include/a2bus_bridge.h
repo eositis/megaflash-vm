@@ -12,10 +12,7 @@
  *     0x01 PHI   (Apple connect pulse)
  *     0x02 READ  + nibble (0..15)
  *     0x03 WRITE + nibble + data
- *     0x04 PEEK  + nibble
- *     0x05 U2BURST + count (0=256): W5100 DATA auto-inc bytes
  *   S->C: status (0=ok) + data
- *   U2BURST: status + count + count bytes
  */
 
 #define A2BUS_BRIDGE_OP_PING  0x00
@@ -23,7 +20,6 @@
 #define A2BUS_BRIDGE_OP_READ  0x02
 #define A2BUS_BRIDGE_OP_WRITE 0x03
 #define A2BUS_BRIDGE_OP_PEEK  0x04
-#define A2BUS_BRIDGE_OP_U2BURST 0x05
 
 typedef void (*a2bus_bridge_pump_fn)(unsigned steps);
 

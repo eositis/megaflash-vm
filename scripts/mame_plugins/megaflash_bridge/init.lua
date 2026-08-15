@@ -9,7 +9,7 @@
 
 	local exports = {
 	name = "megaflash_bridge",
-	version = "0.1.12",
+	version = "0.1.11",
 	description = "Bramble MegaFlash $C0C0-$C0C7 TCP bridge (MegaFlash + Uthernet II)",
 	license = "BSD-3-Clause",
 	author = { name = "eositis" }
@@ -102,65 +102,18 @@ local function rpc(sock, req)
 	return buf:byte(2)
 end
 
--- A2Stream PWM LDA $C0C7 is 4 cycles on a real W5100. Per-byte TCP RPC
--- stalls MAME so host speaker audio is hash. Prefetch the DATA window.
-local function rpc_u2_burst(sock, count)
-	if not sock then
-		return nil
-	end
-	local nreq = count
-	if nreq >= 256 then
-		nreq = 0
-	end
-	sock:write(string.char(0x05, nreq))
-	local deadline = os.clock() + 2.0
-	local buf = ""
-	while #buf < 2 do
-		local chunk = sock:read(2 - #buf)
-		if chunk and #chunk > 0 then
-			buf = buf .. chunk
-		elseif os.clock() > deadline then
-			return nil
-		end
-	end
-	if buf:byte(1) ~= 0 then
-		return nil
-	end
-	local n = buf:byte(2)
-	if n == 0 then
-		return ""
-	end
-	while #buf < 2 + n do
-		local chunk = sock:read((2 + n) - #buf)
-		if chunk and #chunk > 0 then
-			buf = buf .. chunk
-		elseif os.clock() > deadline then
-			return nil
-		end
-	end
-	return buf:sub(3)
-end
-
 function plugin.startplugin()
 	local sock = nil
 	local taps = {}
 	local tap_count = 0
 	local connect_tries = 0
 	local taps_ready = false
-	local u2_burst = ""
-	local u2_burst_i = 1
-
-	local function u2_burst_invalidate()
-		u2_burst = ""
-		u2_burst_i = 1
-	end
 
 	local function ensure_sock()
 		if sock then
 			return true
 		end
 		connect_tries = connect_tries + 1
-		u2_burst_invalidate()
 		local s, err = try_open_bridge()
 		if not s then
 			if connect_tries <= 5 or (connect_tries % 60) == 0 then
@@ -295,22 +248,7 @@ function plugin.startplugin()
 					return data
 				end
 				local nibble, addr = nibble_from_offset(offset)
-				local v
-				if nibble == 7 then
-					if u2_burst_i > #u2_burst then
-						u2_burst = rpc_u2_burst(sock, 256) or ""
-						u2_burst_i = 1
-					end
-					if #u2_burst >= u2_burst_i then
-						v = u2_burst:byte(u2_burst_i)
-						u2_burst_i = u2_burst_i + 1
-					end
-				else
-					if nibble >= 4 then
-						u2_burst_invalidate()
-					end
-					v = rpc(sock, string.char(0x02, nibble))
-				end
+				local v = rpc(sock, string.char(0x02, nibble))
 				tap_count = tap_count + 1
 				if tap_count <= 40 then
 					logf("RD $%04X -> %s (#%d)", addr, v and string.format("0x%02X", v) or "nil", tap_count)
@@ -320,7 +258,6 @@ function plugin.startplugin()
 				end
 				sock:close()
 				sock = nil
-				u2_burst_invalidate()
 				return data
 			end)
 
@@ -330,9 +267,6 @@ function plugin.startplugin()
 					return
 				end
 				local nibble, addr = nibble_from_offset(offset)
-				if nibble >= 4 then
-					u2_burst_invalidate()
-				end
 				local byte = data & 0xff
 				local ok = rpc(sock, string.char(0x03, nibble, byte))
 				tap_count = tap_count + 1
@@ -342,7 +276,6 @@ function plugin.startplugin()
 				if not ok then
 					sock:close()
 					sock = nil
-					u2_burst_invalidate()
 				end
 			end)
 
