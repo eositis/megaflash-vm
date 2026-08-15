@@ -58,6 +58,8 @@ Settings persist in:
 
 `~/Library/Application Support/MegaFlashOperator/settings.json`
 
+Shipping to another Mac (feasibility, not implemented): [PACKAGING-MACOS.md](PACKAGING-MACOS.md).
+
 ## Network helper
 
 1. In the app, click **Install network helper…** and approve the admin dialog once.
