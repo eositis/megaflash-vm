@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -94,14 +95,16 @@ def patch_cfg(mode: str) -> None:
 
 def write_launch_files(mode: str, scale: int) -> None:
     w, h = 560 * scale, 384 * scale
+    import shlex
+
     RUN.mkdir(parents=True, exist_ok=True)
     INI_DIR.mkdir(parents=True, exist_ok=True)
     ENV_OUT.write_text(
-        f"export MEGAFLASH_A2_MONITOR={mode}\n"
+        f"export MEGAFLASH_A2_MONITOR={shlex.quote(mode)}\n"
         f"export MEGAFLASH_A2_SCALE={scale}\n"
         f"export MAME_RESOLUTION={w}x{h}\n"
-        f"export MAME_INI_PATH={INI_DIR}\n"
-        f"export MAME_CFG_PATH={CFG_DIR}\n",
+        f"export MAME_INI_PATH={shlex.quote(str(INI_DIR))}\n"
+        f"export MAME_CFG_PATH={shlex.quote(str(CFG_DIR))}\n",
         encoding="utf-8",
     )
     INI.write_text(
