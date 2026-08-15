@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "MegaFlash Operator",
-        "width": 1280,
-        "height": 860,
-        "minWidth": 640,
-        "minHeight": 480
+        "width": 980,
+        "height": 640,
+        "minWidth": 760,
+        "minHeight": 520
       }
     ],
     "security": {

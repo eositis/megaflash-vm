@@ -28,10 +28,10 @@ async function capWindowToScreen(): Promise<void> {
   const mon = await currentMonitor();
   if (!mon) return;
   const scale = mon.scaleFactor || 1;
-  const maxW = Math.max(640, Math.floor(mon.size.width / scale));
-  const maxH = Math.max(480, Math.floor(mon.size.height / scale));
-  const minW = Math.min(640, maxW);
-  const minH = Math.min(480, maxH);
+  const maxW = Math.max(760, Math.floor(mon.size.width / scale));
+  const maxH = Math.max(520, Math.floor(mon.size.height / scale));
+  const minW = Math.min(760, maxW);
+  const minH = Math.min(520, maxH);
   await win.setMinSize(new LogicalSize(minW, minH));
   await win.setMaxSize(new LogicalSize(maxW, maxH));
   const inner = await win.innerSize();

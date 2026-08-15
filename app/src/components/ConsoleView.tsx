@@ -23,6 +23,7 @@ export function ConsoleView({ active }: Props) {
     if (!hostRef.current || termRef.current) return;
     const term = new Terminal({
       cursorBlink: true,
+      cols: 80,
       // Firmware/Pico stdio often sends bare LF; without this, lines staircase.
       convertEol: true,
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
@@ -39,7 +40,17 @@ export function ConsoleView({ active }: Props) {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(hostRef.current);
-    requestAnimationFrame(() => fit.fit());
+    const applyFit = () => {
+      try {
+        fit.fit();
+        if (term.cols > 80) {
+          term.resize(80, term.rows);
+        }
+      } catch {
+        /* host may be hidden */
+      }
+    };
+    requestAnimationFrame(() => applyFit());
     termRef.current = term;
     fitRef.current = fit;
 
@@ -52,13 +63,7 @@ export function ConsoleView({ active }: Props) {
     let fitTimer: number | undefined;
     const scheduleFit = () => {
       window.clearTimeout(fitTimer);
-      fitTimer = window.setTimeout(() => {
-        try {
-          fit.fit();
-        } catch {
-          /* host may be hidden */
-        }
-      }, 50);
+      fitTimer = window.setTimeout(() => applyFit(), 50);
     };
     window.addEventListener("resize", scheduleFit);
     const ro =
@@ -88,9 +93,13 @@ export function ConsoleView({ active }: Props) {
 
   useEffect(() => {
     const id = window.setTimeout(() => {
-      try {
-        fitRef.current?.fit();
-      } catch {
+        try {
+          fitRef.current?.fit();
+          const t = termRef.current;
+          if (t && t.cols > 80) {
+            t.resize(80, t.rows);
+          }
+        } catch {
         /* ignore */
       }
     }, 50);
