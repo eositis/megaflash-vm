@@ -78,6 +78,7 @@ set(OVERLAY_SOURCES
     ${CMAKE_SOURCE_DIR}/bramble-overlay/a2bus.c
     ${CMAKE_SOURCE_DIR}/bramble-overlay/a2bus_bridge.c
     ${CMAKE_SOURCE_DIR}/bramble-overlay/host_uthernet.c
+    ${CMAKE_SOURCE_DIR}/bramble-overlay/host_fpu.c
     ${CMAKE_SOURCE_DIR}/bramble-overlay/megaflash_a2bus_hooks.c
     ${CMAKE_SOURCE_DIR}/bramble-overlay/bramble_ext_a2bus.c
 )

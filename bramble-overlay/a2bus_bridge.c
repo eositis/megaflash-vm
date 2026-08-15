@@ -3,6 +3,7 @@
 #include "devtools.h"
 #include "emulator.h"
 #include "host_uthernet.h"
+#include "host_fpu.h"
 #include "pio.h"
 
 #include <errno.h>
@@ -88,6 +89,10 @@ int a2bus_long_cmd_active(void)
 #define MF_MODE_LINEAR 0u
 #define MF_DATA_MASK  0x1ffu
 #define MF_PARAM_MASK 0x1fu
+#define MF_CMD_RESETBOTHPTRS 0x00u
+#define MF_CMD_FADD 0x30u
+#define MF_CMD_FOUT 0x3au
+#define MF_ERRORFLAG 0x40u
 
 static void a2bus_drop_client(const char *why)
 {
@@ -374,6 +379,72 @@ static void poke_reg(uint8_t nibble, uint8_t val)
     }
 }
 
+static void host_mf_reset_ptrs(void)
+{
+    mem_write32(MF_PARAM_IDX, 0);
+    mem_write32(MF_DATA_IDX, 0);
+    poke_reg(1, mem_read8(MF_PARAM_BUF));
+    poke_reg(2, mem_read8(MF_DATA_BUF));
+    poke_reg(0, (uint8_t)(peek_reg(0) & (uint8_t)~(MF_BUSYFLAG | MF_ERRORFLAG)));
+}
+
+static int host_mf_fpu_cmd(uint8_t cmd)
+{
+    uint8_t buf[32];
+    unsigned i;
+    for (i = 0; i < 32; i++)
+        buf[i] = mem_read8(MF_PARAM_BUF + i);
+    switch (cmd) {
+    case 0x30u:
+        fadd(buf);
+        break;
+    case 0x31u:
+        fmul(buf);
+        break;
+    case 0x32u:
+        fdiv(buf);
+        break;
+    case 0x33u:
+        fsin(buf);
+        break;
+    case 0x34u:
+        fcos(buf);
+        break;
+    case 0x35u:
+        ftan(buf);
+        break;
+    case 0x36u:
+        fatn(buf);
+        break;
+    case 0x37u:
+        flog(buf);
+        break;
+    case 0x38u:
+        fexp(buf);
+        break;
+    case 0x39u:
+        fsqr(buf);
+        break;
+    case 0x3au:
+        fout(buf);
+        break;
+    default:
+        return 0;
+    }
+    for (i = 0; i < 32; i++)
+        mem_write8(MF_PARAM_BUF + i, buf[i]);
+    mem_write32(MF_PARAM_IDX, 0);
+    poke_reg(1, buf[0]);
+    poke_reg(0, (uint8_t)(peek_reg(0) & (uint8_t)~(MF_BUSYFLAG | MF_ERRORFLAG)));
+    static int nlog;
+    if (nlog < 8) {
+        nlog++;
+        fprintf(stderr, "[A2Bus] FPU host-complete CMD=0x%02X err=0x%02X\n",
+                cmd, buf[0]);
+    }
+    return 1;
+}
+
 /*
  * When STATUS is idle, mirror BusLoop DATA/PARAM/ID side-effects in host SRAM
  * so LOAD_CPANEL (58 pages × 256 data reads) does not need a guest pump per byte.
@@ -597,7 +668,13 @@ static int host_fast_write(uint8_t nibble, uint8_t wdata)
         return 0;
     }
     if (nibble == 0u) {
-        return 0; /* CMD — must run guest DoCommand */
+        if (wdata == MF_CMD_RESETBOTHPTRS) {
+            host_mf_reset_ptrs();
+            return 1;
+        }
+        if (wdata >= MF_CMD_FADD && wdata <= MF_CMD_FOUT)
+            return host_mf_fpu_cmd(wdata);
+        return 0; /* other CMD — guest DoCommand */
     }
     if (nibble == 2u) { /* DATA */
         uint32_t idx = mem_read32(MF_DATA_IDX);
