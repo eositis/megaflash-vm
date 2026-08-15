@@ -68,6 +68,13 @@ static uint16_t u2_addr;
 static uint8_t u2_mem[W5100_MEM_SIZE];
 static u2_sock_t sk[4];
 static int ready;
+/* W5100 snapshots RSR/FSR for the 16-bit pair. A2Stream rereads until stable;
+ * filling RX between the high and low byte yields a torn size and the player
+ * treats later samples as earlier ones. */
+static uint16_t u2_rsr_latch[4];
+static uint16_t u2_fsr_latch[4];
+static uint8_t u2_rsr_have[4];
+static uint8_t u2_fsr_have[4];
 
 static uint16_t be16(const uint8_t *p)
 {
@@ -134,6 +141,8 @@ static void chip_reset(void)
         sk[i].rx_wr = sk[i].rx_rd = sk[i].tx_rd = 0;
         sk[i].tcp_fd = -1;
         sk[i].tcp_connecting = 0;
+        u2_rsr_have[i] = 0;
+        u2_fsr_have[i] = 0;
         wr16(&u2_mem[sk[i].sn + SN_TX_RD0], 0);
         wr16(&u2_mem[sk[i].sn + SN_TX_WR0], 0);
         wr16(&u2_mem[sk[i].sn + SN_RX_RD0], 0);
@@ -195,14 +204,28 @@ static uint8_t read_at(uint16_t a)
     if (si >= 0) {
         uint16_t off = (uint16_t)(a & 0xFFu);
         u2_sock_t *s = &sk[si];
-        if (off == SN_RX_RSR0)
-            return (uint8_t)(rx_used(s) >> 8);
-        if (off == SN_RX_RSR0 + 1)
-            return (uint8_t)rx_used(s);
-        if (off == SN_TX_FSR0)
-            return (uint8_t)(tx_free(s) >> 8);
-        if (off == SN_TX_FSR0 + 1)
-            return (uint8_t)tx_free(s);
+        if (off == SN_RX_RSR0) {
+            u2_rsr_latch[si] = rx_used(s);
+            u2_rsr_have[si] = 1;
+            return (uint8_t)(u2_rsr_latch[si] >> 8);
+        }
+        if (off == SN_RX_RSR0 + 1) {
+            if (!u2_rsr_have[si])
+                u2_rsr_latch[si] = rx_used(s);
+            u2_rsr_have[si] = 0;
+            return (uint8_t)u2_rsr_latch[si];
+        }
+        if (off == SN_TX_FSR0) {
+            u2_fsr_latch[si] = tx_free(s);
+            u2_fsr_have[si] = 1;
+            return (uint8_t)(u2_fsr_latch[si] >> 8);
+        }
+        if (off == SN_TX_FSR0 + 1) {
+            if (!u2_fsr_have[si])
+                u2_fsr_latch[si] = tx_free(s);
+            u2_fsr_have[si] = 0;
+            return (uint8_t)u2_fsr_latch[si];
+        }
     }
     return u2_mem[a];
 }
@@ -564,6 +587,8 @@ static void sock_cr(u2_sock_t *s, uint8_t v)
         wr16(&u2_mem[s->sn + SN_TX_RD0], 0);
         wr16(&u2_mem[s->sn + SN_TX_WR0], 0);
         wr16(&u2_mem[s->sn + SN_RX_RD0], 0);
+        u2_rsr_have[(s->sn - W5100_S0) >> 8] = 0;
+        u2_fsr_have[(s->sn - W5100_S0) >> 8] = 0;
         if (mr == SN_MR_MACRAW && s == &sk[0]) {
             u2_mem[s->sn + SN_SR] = SN_SR_MACRAW;
             fprintf(stderr, "[A2Bus] U2 socket0 MACRAW open\n");
@@ -629,7 +654,11 @@ int host_u2_read(uint8_t nibble, uint8_t *out)
 {
     if (!ready)
         chip_reset();
-    host_u2_poll();
+    /* A2Stream SINGLE_SOCKET PWM reads RX DATA with auto-increment. recv() on
+     * every byte tears Sn_RX_RSR and can wrap new payload over unread samples. */
+    uint8_t nb = (uint8_t)(nibble & 3u);
+    if (!(nb == 3u && u2_addr >= W5100_TX_BASE))
+        host_u2_poll();
     switch (nibble & 3u) {
     case 0:
         *out = u2_mr;
@@ -652,6 +681,7 @@ int host_u2_write(uint8_t nibble, uint8_t wdata)
 {
     if (!ready)
         chip_reset();
+    host_u2_poll();
     switch (nibble & 3u) {
     case 0:
         if (wdata & W5100_MR_RST)
