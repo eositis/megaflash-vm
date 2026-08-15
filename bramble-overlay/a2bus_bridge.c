@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifndef MSG_NOSIGNAL
@@ -90,6 +91,8 @@ int a2bus_long_cmd_active(void)
 #define MF_DATA_MASK  0x1ffu
 #define MF_PARAM_MASK 0x1fu
 #define MF_CMD_RESETBOTHPTRS 0x00u
+#define MF_CMD_GETPRODOSTIME 0x17u
+#define MF_CMD_GETPRODOS25TIME 0x18u
 #define MF_CMD_FADD 0x30u
 #define MF_CMD_FOUT 0x3au
 #define MF_ERRORFLAG 0x40u
@@ -388,6 +391,59 @@ static void host_mf_reset_ptrs(void)
     poke_reg(0, (uint8_t)(peek_reg(0) & (uint8_t)~(MF_BUSYFLAG | MF_ERRORFLAG)));
 }
 
+/* Guest DoGetProdos25Time returns zeros unless rtcRunning; a2bus often never
+ * sets that, and STATUS unstick aborts the command. A2SPEED then sees E=0. */
+static int host_mf_prodos_time(uint8_t cmd)
+{
+    struct timespec ts;
+    struct tm t;
+    uint8_t buf[8];
+    unsigned i;
+
+    memset(buf, 0, sizeof(buf));
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
+        ts.tv_sec = time(NULL);
+    if (localtime_r(&ts.tv_sec, &t) == NULL)
+        memset(&t, 0, sizeof(t));
+
+    if (cmd == MF_CMD_GETPRODOS25TIME) {
+        uint32_t t4ms = (uint32_t)(ts.tv_nsec / 4000000L);
+        uint32_t packed;
+        if (t4ms > 249u)
+            t4ms = 249u;
+        buf[0] = (uint8_t)t4ms;
+        buf[1] = (uint8_t)t.tm_sec;
+        packed = ((uint32_t)t.tm_mday << 11) | ((uint32_t)t.tm_hour << 6) |
+                 (uint32_t)t.tm_min;
+        buf[2] = (uint8_t)packed;
+        buf[3] = (uint8_t)(packed >> 8);
+        packed = ((uint32_t)(t.tm_mon + 2) << 12) |
+                 ((uint32_t)(t.tm_year + 1900) & 0xfffu);
+        buf[4] = (uint8_t)packed;
+        buf[5] = (uint8_t)(packed >> 8);
+    } else {
+        uint32_t year = (uint32_t)(t.tm_year % 100);
+        uint32_t date = (year << 9) | ((uint32_t)(t.tm_mon + 1) << 5) |
+                        (uint32_t)t.tm_mday;
+        buf[0] = (uint8_t)date;
+        buf[1] = (uint8_t)(date >> 8);
+        buf[2] = (uint8_t)t.tm_min;
+        buf[3] = (uint8_t)t.tm_hour;
+    }
+    for (i = 0; i < 8; i++)
+        mem_write8(MF_PARAM_BUF + i, buf[i]);
+    mem_write32(MF_PARAM_IDX, 0);
+    poke_reg(1, buf[0]);
+    poke_reg(0, (uint8_t)(peek_reg(0) & (uint8_t)~(MF_BUSYFLAG | MF_ERRORFLAG)));
+    static int nlog;
+    if (nlog < 6) {
+        nlog++;
+        fprintf(stderr, "[A2Bus] ProDOS time host-complete CMD=0x%02X %02u:%02u:%02u\n",
+                cmd, (unsigned)t.tm_hour, (unsigned)t.tm_min, (unsigned)t.tm_sec);
+    }
+    return 1;
+}
+
 static int host_mf_fpu_cmd(uint8_t cmd)
 {
     uint8_t buf[32];
@@ -672,6 +728,8 @@ static int host_fast_write(uint8_t nibble, uint8_t wdata)
             host_mf_reset_ptrs();
             return 1;
         }
+        if (wdata == MF_CMD_GETPRODOSTIME || wdata == MF_CMD_GETPRODOS25TIME)
+            return host_mf_prodos_time(wdata);
         if (wdata >= MF_CMD_FADD && wdata <= MF_CMD_FOUT)
             return host_mf_fpu_cmd(wdata);
         return 0; /* other CMD — guest DoCommand */

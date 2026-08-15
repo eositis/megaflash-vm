@@ -124,7 +124,7 @@ Client (MAME plugin) → server (Bramble):
 
 Reply: `status` (0 = ok), `data`.
 
-**Applesoft FPU:** MegaFlash ROM patches FMUL/FDIV/FOUT/… when the CP FPU flag is on. Under a2bus, guest `DoCommand` never finishes before the next `$C0C0` STATUS poll, which **unsticks BUSY** and leaves PARAM garbage → `?ILLEGAL QUANTITY ERROR IN` (no line number). Overlay **host-completes** CMD `$00` (reset pointers) and `$30–$3A` (same MBF math as `pico/fpu.c`) in the CMD-write RPC so the 6502 sees idle + error byte 0. Re-enable FPU in the CP to test; Bramble log shows `[A2Bus] FPU host-complete CMD=0x31`.
+**ProDOS 2.5 time (`CMD $18`):** Guest `DoGetProdos25Time` returns six zero bytes unless firmware `rtcRunning` is set (often never under a2bus). A2SPEED then prints `Timed speed: (invalid elapsed)`. Overlay host-completes `$17`/`$18` from host `clock_gettime` (4 ms units 0–249 + HMS).
 
 **Uthernet II / Telnet65 / wget:** Lua taps `$C0C4–$C0C7`. Overlay host-completes the W5100 window. Local DHCP is Ethernet+IP broadcast with `yiaddr=192.168.4.3`. DNS is userspace UDP NAT. **IP65 TCP (telnet/wget) is MACRAW + TAP TCP NAT.** **A2Stream** uses W5100 **hardware TCP on socket 1** after ip65 DHCP/DNS on socket 0 — CONNECT/SEND/RECV are host sockets, not Ethernet frames. W5100 socket0 RX is 4KB; TAP NAT must not `recv()` faster than Contiki can RECV (wget also writes MegaFlash). Sniff returns 0 when RX is full; TAP holds the segment and logs `[TAP] TCP NAT pause (W5100 RX full)`.
 
