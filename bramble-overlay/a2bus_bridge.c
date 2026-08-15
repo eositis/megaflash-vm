@@ -877,6 +877,27 @@ static void handle_one(void)
         data = peek_reg(nibble);
         break;
     }
+    case A2BUS_BRIDGE_OP_U2BURST: {
+        uint8_t count = 0;
+        if (recv_exact(br.client_fd, &count, 1) < 0) {
+            br.handling = 0;
+            a2bus_drop_client("bridge client recv error — dropped");
+            return;
+        }
+        br.saw_bus_io = 1;
+        int n = count == 0 ? 256 : (int)count;
+        uint8_t payload[256];
+        int got = host_u2_read_burst(payload, n);
+        if (got < 1)
+            got = 0;
+        uint8_t hdr[2] = { 0, (uint8_t)got };
+        br.handling = 0;
+        if (send_all(br.client_fd, hdr, 2) < 0 ||
+            (got > 0 && send_all(br.client_fd, payload, (size_t)got) < 0)) {
+            a2bus_drop_client("bridge client send error — dropped");
+        }
+        return;
+    }
     default:
         status = 1;
         break;

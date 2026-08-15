@@ -677,6 +677,29 @@ int host_u2_read(uint8_t nibble, uint8_t *out)
     }
 }
 
+int host_u2_read_burst(uint8_t *dst, int maxn)
+{
+    if (!ready)
+        chip_reset();
+    if (!dst || maxn < 1)
+        return 0;
+    if (maxn > 256)
+        maxn = 256;
+    /* Register-space DATA (RSR/RX_RD) must stay single-byte. PWM copies the
+     * RX window; one RPC per sample stalls MAME so speaker audio hashes. */
+    if (!(u2_mr & W5100_MR_AI) || u2_addr < W5100_TX_BASE) {
+        host_u2_poll();
+        dst[0] = read_at(u2_addr);
+        autoinc();
+        return 1;
+    }
+    for (int i = 0; i < maxn; i++) {
+        dst[i] = read_at(u2_addr);
+        autoinc();
+    }
+    return maxn;
+}
+
 int host_u2_write(uint8_t nibble, uint8_t wdata)
 {
     if (!ready)
