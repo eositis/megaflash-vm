@@ -3,8 +3,8 @@
  * registers.r[4..7] under a2bus inject (DATA reads stay 0x00), so the
  * 6502 W5100 window is completed here in the same RPC — AppleWin-style.
  *
- * Socket 0: MACRAW (IP65 / Contiki). Sockets 0–3: hardware TCP (A2Stream
- * uses socket 1 after ip65 DHCP/DNS on socket 0).
+ * Socket 0: MACRAW (IP65) or hardware TCP (A2Stream -D SINGLE_SOCKET).
+ * Sockets 0–3: hardware TCP OPEN/CONNECT/SEND/RECV.
  */
 #include "host_uthernet.h"
 #include "cyw43.h"
@@ -76,6 +76,8 @@ static uint16_t u2_fsr_latch[4];
 static uint8_t u2_rsr_have[4];
 static uint8_t u2_fsr_have[4];
 
+static void tcp_recv_sock(u2_sock_t *s);
+
 static uint16_t be16(const uint8_t *p)
 {
     return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
@@ -127,8 +129,8 @@ static void chip_reset(void)
     u2_mem[0x17] = 0x07;
     u2_mem[0x18] = 0xD0;
     u2_mem[0x19] = 0x08;
-    u2_mem[0x1a] = 0x06;
-    u2_mem[0x1b] = 0x06;
+    u2_mem[0x1a] = 0x55;
+    u2_mem[0x1b] = 0x55;
     u2_mem[0x28] = 0x28;
     u2_mem[0x09] = 0x00;
     u2_mem[0x0a] = 0x08;
@@ -205,13 +207,16 @@ static uint8_t read_at(uint16_t a)
         uint16_t off = (uint16_t)(a & 0xFFu);
         u2_sock_t *s = &sk[si];
         if (off == SN_RX_RSR0) {
+            tcp_recv_sock(s);
             u2_rsr_latch[si] = rx_used(s);
             u2_rsr_have[si] = 1;
             return (uint8_t)(u2_rsr_latch[si] >> 8);
         }
         if (off == SN_RX_RSR0 + 1) {
-            if (!u2_rsr_have[si])
+            if (!u2_rsr_have[si]) {
+                tcp_recv_sock(s);
                 u2_rsr_latch[si] = rx_used(s);
+            }
             u2_rsr_have[si] = 0;
             return (uint8_t)u2_rsr_latch[si];
         }
@@ -519,41 +524,44 @@ static int tcp_connect_start(u2_sock_t *s)
     return 0;
 }
 
-static void tcp_poll_sock(u2_sock_t *s)
+static void tcp_poll_connect(u2_sock_t *s)
 {
-    if (s->tcp_fd < 0)
+    if (s->tcp_fd < 0 || !s->tcp_connecting)
         return;
     struct pollfd p;
     p.fd = s->tcp_fd;
-    p.events = POLLIN;
-    if (s->tcp_connecting)
-        p.events |= POLLOUT;
+    p.events = POLLOUT;
     p.revents = 0;
     if (poll(&p, 1, 0) < 0)
         return;
-    if (s->tcp_connecting && (p.revents & (POLLOUT | POLLERR | POLLHUP))) {
-        int err = 0;
-        socklen_t elen = sizeof(err);
-        getsockopt(s->tcp_fd, SOL_SOCKET, SO_ERROR, &err, &elen);
-        if (err != 0) {
-            fprintf(stderr, "[A2Bus] U2 TCP connect failed: %s\n", strerror(err));
-            sock_tcp_close(s);
-            u2_mem[s->sn + SN_SR] = SN_SR_CLOSED;
-            return;
-        }
-        s->tcp_connecting = 0;
-        u2_mem[s->sn + SN_SR] = SN_SR_ESTABLISHED;
-        fprintf(stderr, "[A2Bus] U2 TCP ESTABLISHED\n");
+    if (!(p.revents & (POLLOUT | POLLERR | POLLHUP)))
+        return;
+    int err = 0;
+    socklen_t elen = sizeof(err);
+    getsockopt(s->tcp_fd, SOL_SOCKET, SO_ERROR, &err, &elen);
+    if (err != 0) {
+        fprintf(stderr, "[A2Bus] U2 TCP connect failed: %s\n", strerror(err));
+        sock_tcp_close(s);
+        u2_mem[s->sn + SN_SR] = SN_SR_CLOSED;
+        return;
     }
+    s->tcp_connecting = 0;
+    u2_mem[s->sn + SN_SR] = SN_SR_ESTABLISHED;
+    fprintf(stderr, "[A2Bus] U2 TCP ESTABLISHED\n");
+}
+
+static void tcp_recv_sock(u2_sock_t *s)
+{
+    if (s->tcp_fd < 0)
+        return;
     if (u2_mem[s->sn + SN_SR] != SN_SR_ESTABLISHED &&
         u2_mem[s->sn + SN_SR] != SN_SR_CLOSE_WAIT)
         return;
-    if (!(p.revents & (POLLIN | POLLHUP)))
-        return;
     uint16_t used = rx_used(s);
-    if (used >= s->rx_size)
+    if (s->rx_size < 2 || used >= (uint16_t)(s->rx_size - 1u))
         return;
-    uint16_t space = (uint16_t)(s->rx_size - used);
+    /* Leave one byte free (AppleWin): full vs empty is wr==rd if packed. */
+    uint16_t space = (uint16_t)(s->rx_size - 1u - used);
     uint8_t buf[512];
     size_t want = space > sizeof(buf) ? sizeof(buf) : (size_t)space;
     ssize_t n = recv(s->tcp_fd, buf, want, 0);
@@ -723,5 +731,5 @@ void host_u2_poll(void)
     if (cyw43.tap_fd >= 0)
         tapif_service(cyw43.tap_fd);
     for (int i = 0; i < 4; i++)
-        tcp_poll_sock(&sk[i]);
+        tcp_poll_connect(&sk[i]);
 }
