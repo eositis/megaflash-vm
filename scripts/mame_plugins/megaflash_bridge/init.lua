@@ -9,7 +9,7 @@
 
 	local exports = {
 	name = "megaflash_bridge",
-	version = "0.1.10",
+	version = "0.1.11",
 	description = "Bramble MegaFlash $C0C0-$C0C7 TCP bridge (MegaFlash + Uthernet II)",
 	license = "BSD-3-Clause",
 	author = { name = "eositis" }
@@ -217,6 +217,26 @@ function plugin.startplugin()
 					if data == b0 or data == b1 then
 						return data
 					end
+					-- DS1216E typically hijacks D0. Restore the *current* ROM bank,
+					-- not always bank0 — aux MegaFlash lives at $C580/$C755.
+					if (data & 0xfe) == (b0 & 0xfe) then
+						return b0
+					end
+					if (data & 0xfe) == (b1 & 0xfe) then
+						return b1
+					end
+					local function ham(a, b)
+						local x = a ~ b
+						local n = 0
+						while x > 0 do
+							n = n + (x & 1)
+							x = x >> 1
+						end
+						return n
+					end
+					if ham(data, b1) < ham(data, b0) then
+						return b1
+					end
 					return b0
 				end)
 			logf("NSC muted on $C100-$CFFF (use MegaFlash clock)")
@@ -267,12 +287,16 @@ function plugin.startplugin()
 
 	emu.add_machine_reset_notifier(function()
 		taps_ready = false
+		-- MAME may load stock 3410445b.256 when CRC mismatches MegaFlash iic.bin.
+		-- Always overlay the full 32K MegaFlash ROM from BRAMBLE_IIC_BIN.
+		load_iic_rom()
 		install_taps()
 	end)
 
 	-- Reset may already have fired before the plugin registered; also reconnect.
 	emu.register_periodic(function()
 		if not taps_ready then
+			load_iic_rom()
 			install_taps()
 		elseif not sock then
 			ensure_sock()

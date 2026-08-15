@@ -9,7 +9,7 @@ Operator guide for **megaflash-vm**: link MAME’s Apple //c (rev 4, `apple2c4`)
 1. **Sibling checkouts:** `../Bramble`, `../MegaFlash` (build tree), and this repo
 2. **Build overlay Bramble:** `cmake -B build && make -C build bramble` (in this repo)
 3. **Guest firmware in this repo:** `firmware/megaflash.uf2` (and optional `.elf`) — run `./scripts/sync-firmware-from-megaflash.sh` after building MegaFlash
-4. **MegaFlash IIc ROM:** `iic.bin` (32 KiB) at this repo root
+4. **MegaFlash IIc ROM:** `iic.bin` (32 KiB) at this repo root — copy from `../MegaFlash/firmware/iic.bin` (`./scripts/sync-firmware-from-megaflash.sh`). Do **not** use stock MAME/Ample `3410445b.256` (ROM4). The Lua plugin overlays `BRAMBLE_IIC_BIN` onto `:maincpu` at reset so a CRC mismatch cannot silently keep stock ROM.
 5. **SPI volumes:** `flash/spi-flash1.bin` / `spi-flash2.bin` (SmartPort boot from volume 1)
 6. **MAME:** `brew install mame` (or set `MAME=/path/to/mame`)
 7. **Stock companion dumps** (CHR, keyboard, Votrax `sc01a.bin`). On macOS with Ample, the launcher copies them from
