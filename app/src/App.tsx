@@ -327,6 +327,7 @@ function App() {
               </button>
               <button
                 type="button"
+                className="danger"
                 disabled={busy || !status.picoRunning}
                 onClick={() => void run(() => api.stopPico())}
               >
@@ -513,6 +514,7 @@ function App() {
               </button>
               <button
                 type="button"
+                className="danger"
                 disabled={busy || !status.mameRunning}
                 onClick={() => void run(() => api.stopMame())}
               >

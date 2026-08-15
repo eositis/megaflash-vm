@@ -241,6 +241,15 @@ button.primary:hover:not(:disabled) {
   background: #2ea043;
 }
 
+button.danger {
+  background: #a40e26;
+  border-color: #da3633;
+}
+
+button.danger:hover:not(:disabled) {
+  background: #c41e3a;
+}
+
 .actions {
   margin-top: 0.5rem;
 }
