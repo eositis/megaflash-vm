@@ -10,7 +10,7 @@ Planning note (2026-08-15). Not implemented. Goal: install MegaFlash Operator on
 | Overlay `bramble` | Yes | ~742 KiB, links only `libSystem`. Copy next to Resources. |
 | Scripts, Lua plugin, stub, UF2, `iic.bin` | Yes | Required. Packaged `MEGAFLASH_VM_ROOT` must point at these, not `~/Documents/GitHub/…`. |
 | Bramble `macos-cyw43-pf-nat.sh` | Yes (copy in) | Helper install currently requires sibling `../Bramble`. |
-| SPI flash images | Optional empty files | User data; do not ship a populated ProDOS volume unless you intend to. |
+| SPI flash images | **Yes (demo volumes)** | Staged from the build machine Operator profile (`spi-flash*.bin` + user config). |
 | **MAME binary + Homebrew dylibs** | **No (not as default)** | See below. First-run **download/install** is the practical path. |
 | Apple CHR / keyboard / Votrax dumps | **No** | Copyrighted. Keep current Ample-or-pick-files flow. |
 | Homebrew itself | No | Optional accelerator if the user already has it. |
@@ -56,7 +56,7 @@ MegaFlash Operator.app
     scripts/macos-cyw43-pf-nat.sh   # vendored copy
     scripts/macos-sudo-askpass.sh
     roms/                    # empty dirs; user-supplied dumps
-    flash/                   # optional empty spi-flash*.bin
+    flash/                   # demo spi-flash*.bin from build profile
 
 ~/Library/Application Support/MegaFlashOperator/
   settings.json
@@ -92,7 +92,7 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 **P0 — packaged runtime (implemented 2026-08-15)**  
 - `scripts/stage-operator-runtime.sh` copies overlay bramble, UF2, `iic.bin`, launch scripts, Lua plugin, vendored `macos-cyw43-pf-nat.sh` into `app/src-tauri/runtime/` (gitignored).  
 - Tauri `bundle.resources` embeds that tree; packaged `default_vm_root()` is `Contents/Resources/runtime`.  
-- Writable flash/roms/`.run` live under `~/Library/Application Support/MegaFlashOperator/`.  
+- Writable flash/roms/`.run` live under `~/Library/Application Support/MegaFlashOperator/` (demo `spi-flash*.bin` copied from the bundle on first launch if dest is empty).  
 - Network helper install uses `runtime/scripts/macos-cyw43-pf-nat.sh` (no `../Bramble`).  
 - `MAME_STOCK_PLUGINS` also searches Application Support `mame/plugins`.  
 - Notarize still needs an Apple Developer ID (not done in P0).
@@ -106,7 +106,7 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 
 **P3 — installer polish**  
 - DMG layout (Applications symlink). Optional `.pkg` is unnecessary if P0+P1 are solid.  
-- Empty SPI flash templates; document that volumes are user data.
+- Demo SPI volumes are already staged from the build profile (not empty templates).
 
 ## Dependencies that stay out of band
 

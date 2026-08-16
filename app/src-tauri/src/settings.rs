@@ -128,21 +128,52 @@ fn looks_like_dev_tree(path: &str) -> bool {
     path.contains("Documents/GitHub")
 }
 
-fn seed_from_checkout(name: &str, dest: &Path) -> bool {
-    let src = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Documents/GitHub/megaflash-vm/flash")
-        .join(name);
-    if !src.is_file() {
+fn flash_looks_uninitialized(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Err(_) => true,
+        Ok(m) if m.len() == 0 => true,
+        Ok(_) => {
+            use std::io::Read;
+            let mut buf = [0u8; 512];
+            let Ok(mut f) = fs::File::open(path) else {
+                return true;
+            };
+            let n = f.read(&mut buf).unwrap_or(0);
+            n == 0 || buf[..n].iter().all(|&b| b == 0)
+        }
+    }
+}
+
+/// Copy a demo volume into Application Support if missing or still empty.
+fn seed_flash_file(name: &str, dest: &Path, runtime: Option<&Path>) -> bool {
+    if dest.is_file() && !flash_looks_uninitialized(dest) {
         return false;
     }
-    if dest.is_file() {
-        return false;
+    let mut srcs: Vec<PathBuf> = Vec::new();
+    if let Some(rt) = runtime {
+        srcs.push(rt.join("flash").join(name));
     }
-    if let Some(parent) = dest.parent() {
-        let _ = fs::create_dir_all(parent);
+    srcs.push(
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Documents/GitHub/megaflash-vm/flash")
+            .join(name),
+    );
+    for src in srcs {
+        if !src.is_file() {
+            continue;
+        }
+        if src == dest {
+            return false;
+        }
+        if let Some(parent) = dest.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::copy(&src, dest).is_ok() {
+            return true;
+        }
     }
-    fs::copy(&src, dest).is_ok()
+    false
 }
 
 fn normalize_packaged(s: &mut Settings) -> bool {
@@ -162,23 +193,23 @@ fn normalize_packaged(s: &mut Settings) -> bool {
         changed = true;
     }
     let flash = writable_data_dir().join("flash");
-    let _ = seed_from_checkout("megaflash-user-config.bin", &flash.join("megaflash-user-config.bin"));
+    let rt = Some(rt.as_path());
+    let _ = seed_flash_file(
+        "megaflash-user-config.bin",
+        &flash.join("megaflash-user-config.bin"),
+        rt,
+    );
     for (path, name) in [
         (&mut s.spi_flash1_path, "spi-flash1.bin"),
         (&mut s.spi_flash2_path, "spi-flash2.bin"),
     ] {
-        let p = PathBuf::from(&*path);
-        if p.is_file() {
-            continue;
-        }
         let dest = flash.join(name);
-        if seed_from_checkout(name, &dest) {
-            *path = dest.display().to_string();
+        let seeded = seed_flash_file(name, &dest, rt);
+        let dest_s = dest.display().to_string();
+        if *path != dest_s {
+            *path = dest_s;
             changed = true;
-            continue;
-        }
-        if looks_like_dev_tree(path) || !p.parent().map(|d| d.is_dir()).unwrap_or(false) {
-            *path = dest.display().to_string();
+        } else if seeded {
             changed = true;
         }
     }

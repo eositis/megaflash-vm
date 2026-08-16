@@ -6,6 +6,6 @@
 | `spi-flash2.bin` | Chip #2 |
 | `megaflash-user-config.bin` | Mirrored MegaFlash user settings (written by Bramble a2bus path) |
 
-Gitignored. The MAME launcher passes absolute paths and runs Bramble with cwd = megaflash-vm so relative `flash/megaflash-user-config.bin` resolves here.
+Gitignored (do not commit 64 MB images). `scripts/stage-operator-runtime.sh` copies the **current Operator profile** volumes (`~/Library/Application Support/MegaFlashOperator/flash/`, else this directory) into the packaged `.app` so a demo Mac boots the same SmartPort disks. First launch copies those into Application Support if the dest files are missing or still empty (all-zero header). Later user writes are not overwritten.
 
 `../A2DeskTop.hdv` is a reference ProDOS image matching volume 1 contents (not loaded by MAME directly).
