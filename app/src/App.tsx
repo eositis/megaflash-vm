@@ -102,7 +102,7 @@ function App() {
                 !report.pythonOk
                   ? "Homebrew python3 is required for Launch //c (approve admin; install Xcode Command Line Tools if macOS asks)."
                   : "",
-                !report.mameOk ? "MAME 0.288 is not installed." : "",
+                !report.mameOk ? "MAME is not installed (brew install mame)." : "",
               ]
                 .filter(Boolean)
                 .join(" ")
@@ -179,7 +179,7 @@ function App() {
       {(error || msg || setupBusy) && (
         <div className={`banner ${error ? "err" : "ok"}`}>
           {setupBusy
-            ? "Finishing install: network helper, Accessibility, Homebrew python3, MAME 0.288…"
+            ? "Finishing install: network helper, Accessibility, Homebrew python3, MAME…"
             : error || msg}
         </div>
       )}
@@ -561,12 +561,12 @@ function App() {
                   void run(async () => {
                     await api.openMameInstaller();
                     setMsg(
-                      "Opened Install MAME 0.288 — finish that Terminal window, then Launch //c"
+                      "Opened Install MAME — finish that Terminal window (brew install mame), then Launch //c"
                     );
                   })
                 }
               >
-                Install MAME 0.288…
+                Install MAME…
               </button>
             </div>
           </section>

@@ -130,15 +130,15 @@ fn looks_like_dev_tree(path: &str) -> bool {
 }
 
 fn publish_mame_installer(runtime: &Path) {
-    let src = runtime.join("scripts/Install MAME 0.288.command");
+    let src = runtime.join("scripts/Install MAME.command");
     if !src.is_file() {
         return;
     }
-    let as_copy = writable_data_dir().join("Install MAME 0.288.command");
+    let as_copy = writable_data_dir().join("Install MAME.command");
     let _ = fs::copy(&src, &as_copy);
     let _ = Command::new("chmod").arg("+x").arg(&as_copy).status();
     if let Some(home) = dirs::home_dir() {
-        let desk = home.join("Desktop/Install MAME 0.288.command");
+        let desk = home.join("Desktop/Install MAME.command");
         if !desk.is_file() {
             let _ = fs::copy(&src, &desk);
             let _ = Command::new("chmod").arg("+x").arg(&desk).status();

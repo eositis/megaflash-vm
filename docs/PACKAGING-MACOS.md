@@ -65,11 +65,11 @@ MegaFlash Operator.app
   flash/                     # writable SPI images (if not in-bundle)
 ```
 
-Installer = **signed DMG** (already built) that copies the `.app` to `/Applications`. The DMG also contains **Install MAME 0.288.command**. First launch:
+Installer = **signed DMG** (already built) that copies the `.app` to `/Applications`. The DMG also contains **Install MAME.command** (`brew install mame`). First launch:
 
 1. Create Application Support dirs; if `megaflash_vm_root` is still the GitHub path, retarget to `Contents/Resources/runtime`.
 2. **MAME check** (in order): env `MAME`, bundled relocatable mame (if we add it later), `/opt/homebrew/bin/mame`, `/usr/local/bin/mame`, `~/Library/Application Support/MegaFlashOperator/mame/mame`, Ample’s embedded mame if present.
-3. If MAME is missing: double-click **Install MAME 0.288.command** (extracts formula 0.288 into tap `local/mame288`). Do not `brew install mame` (that is 0.289).
+3. If MAME is missing: double-click **Install MAME.command** (`brew install mame`).
 4. **ROM check**: if `roms/apple2c4` lacks CHR/keyboard, offer *Copy from Ample* or *Choose files*. Never download Apple dumps.
 5. First launch: admin dialog for tun/pf helper; one Accessibility TCC prompt and Privacy settings.
 
@@ -77,7 +77,7 @@ Installer = **signed DMG** (already built) that copies the `.app` to `/Applicati
 
 Prefer **user-owned** `~/Library/Application Support/MegaFlashOperator/mame/`:
 
-- If Homebrew exists: double-click **Install MAME 0.288.command** (`brew extract` 0.288). Do not install current core `mame`.
+- If Homebrew exists: **Install MAME.command** runs `brew install mame`.
 - Else: fetch a **macOS arm64/x64 MAME binary** from a pinned [MAMEdev](https://github.com/mamedev/mame/releases) asset (or a mirror you control), unpack there, and set `MAME_STOCK_PLUGINS` to that tree’s `plugins/` (must contain `boot.lua`). Show license/GPL notice in the dialog.
 - Fallback: file picker for an already-installed `mame`.
 
@@ -100,13 +100,13 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 **P1 — first-launch install (implemented 2026-08-15)**  
 - Packaged (or incomplete) launch: admin dialog for tun/pf helper; one Accessibility TCC prompt + open Privacy settings.  
 - If `python3` is missing or is only the Xcode stub: install **Homebrew** (admin) then `brew install python3` (`scripts/macos-ensure-homebrew-python.sh`). Launch //c’s a2bus wait needs a real interpreter.  
-- MAME **pinned to 0.288** (the build we tested). Will not `brew install` if Homebrew’s formula is a newer version. Existing 0.288 on PATH is used. Latest public MAME is not auto-pulled (SDL/plugin churn).
+- MAME via **`brew install mame`** (current Homebrew formula). Existing `mame` on PATH is used.
 
 **P2 — optional relocatable MAME**  
 - Only if download-from-GitHub is too flaky: `dylibbundler` a Homebrew mame into `runtime/mame/` plus GPL `COPYING` and source URL. Size ~0.5 GiB.
 
 **P3 — installer polish**  
-- DMG layout (Applications symlink + **Install MAME 0.288.command**). Optional `.pkg` is unnecessary if P0+P1 are solid.  
+- DMG layout (Applications symlink + **Install MAME.command**). Optional `.pkg` is unnecessary if P0+P1 are solid.  
 - Demo SPI volumes are already staged from the build profile (not empty templates).
 
 ## Dependencies that stay out of band

@@ -9,7 +9,7 @@ Desktop app for running MegaFlash under Bramble: **Pico USB console** first, the
 - Rust stable (`rustup`)
 - Overlay Bramble built in this repo: `cmake -B build && make -C build bramble`
 - Firmware: `firmware/megaflash.uf2` (or sync via the app / `./scripts/sync-firmware-from-megaflash.sh`)
-- For //c mode: MAME **0.288** (double-click `scripts/Install MAME 0.288.command`, or Operator **Install MAME 0.288…**). Do not `brew install mame` (that is 0.289 now). `iic.bin` is bundled.
+- For //c mode: MAME via `brew install mame` (double-click `scripts/Install MAME.command` or Operator **Install MAME…**). `iic.bin` is bundled.
 
 ## Develop
 
@@ -33,7 +33,7 @@ The app bundle lands under:
 
 `app/src-tauri/target/release/bundle/macos/MegaFlash Operator.app`
 
-The DMG (`…/bundle/dmg/MegaFlash Operator_0.1.0_aarch64.dmg`) contains the **.app**, an Applications shortcut, **Install MAME 0.288.command**, and a short Read Me. Double-click the `.command` on that disk after opening Operator once (so Homebrew exists). Do not `brew install mame` (that is 0.289).
+The DMG contains the **.app**, an Applications shortcut, **Install MAME.command**, and a short Read Me. The `.command` runs `brew install mame`. Open Operator once first so Homebrew exists.
 
 **Important:** `cargo build --release` alone does **not** refresh that `.app`. After a fix, run `npm run tauri build` (or `npm run tauri dev`) so Finder/`open` is not launching a stale binary. Compare mtimes under `…/bundle/macos/…/MacOS/megaflash-operator` vs `target/release/megaflash-operator`.
 

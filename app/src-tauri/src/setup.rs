@@ -1,14 +1,11 @@
 //! First-launch install: tun/pf helper (admin), Accessibility (TCC prompt),
-//! pinned MAME. Do not auto-install whatever Homebrew currently calls "latest".
+//! Homebrew python3, and `brew install mame` if mame is missing.
 use crate::mame_win;
 use crate::net_helper;
 use crate::settings::writable_data_dir;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::Command;
-
-/// MAME we have actually run with apple2c4 + megaflash_bridge.
-pub const PINNED_MAME: &str = "0.288";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,38 +122,12 @@ fn brew_bin() -> Option<PathBuf> {
     None
 }
 
-/// Homebrew formula "stable" version, e.g. "0.288".
-fn brew_mame_formula_version(brew: &PathBuf) -> Option<String> {
-    let out = Command::new(brew).args(["info", "mame"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    for line in text.lines() {
-        // "mame: stable 0.288"
-        if let Some(rest) = line.strip_prefix("mame:") {
-            if let Some(idx) = rest.find("stable") {
-                let after = rest[idx + "stable".len()..].trim();
-                let ver = after.split_whitespace().next()?;
-                return Some(ver.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn brew_install_pinned_mame() -> Result<(PathBuf, String), String> {
+fn brew_install_mame() -> Result<(PathBuf, String), String> {
     let brew = brew_bin().ok_or_else(|| {
-        format!(
-            "MAME {PINNED_MAME} is not installed and Homebrew was not found. Install MAME {PINNED_MAME} (brew install mame when that formula is still {PINNED_MAME})."
-        )
+        "MAME is not installed and Homebrew was not found. Open Operator once to install Homebrew, then run Install MAME.command (brew install mame).".to_string()
     })?;
-    let formula = brew_mame_formula_version(&brew).unwrap_or_else(|| "unknown".into());
-    if formula != PINNED_MAME {
-        return Err(format!(
-            "Homebrew mame formula is {formula}, not tested {PINNED_MAME}. Operator will not auto-install latest (SDL/plugins change). Install MAME {PINNED_MAME} or keep a {PINNED_MAME} binary at /opt/homebrew/bin/mame."
-        ));
-    }
     let status = Command::new(&brew)
         .args(["install", "mame"])
-        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
         .status()
         .map_err(|e| format!("brew install mame: {e}"))?;
     if !status.success() {
@@ -167,18 +138,13 @@ fn brew_install_pinned_mame() -> Result<(PathBuf, String), String> {
 
 fn ensure_mame() -> (bool, String, String) {
     if let Some((path, ver)) = find_mame() {
-        let ok = ver == PINNED_MAME || ver.starts_with(PINNED_MAME);
-        let note = if ok {
-            format!("MAME {ver} ({})", path.display())
-        } else {
-            format!(
-                "Using installed MAME {ver} at {} (tested {PINNED_MAME})",
-                path.display()
-            )
-        };
-        return (true, ver, note);
+        return (
+            true,
+            ver.clone(),
+            format!("MAME {ver} ({})", path.display()),
+        );
     }
-    match brew_install_pinned_mame() {
+    match brew_install_mame() {
         Ok((path, ver)) => (
             true,
             ver.clone(),

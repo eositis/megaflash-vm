@@ -208,7 +208,7 @@ async fn open_mame_installer(
     tauri::async_runtime::spawn_blocking(move || {
         let root = state.get_settings_clone().megaflash_vm_root;
         let path = std::path::PathBuf::from(root)
-            .join("scripts/Install MAME 0.288.command");
+            .join("scripts/Install MAME.command");
         if !path.is_file() {
             return Err(format!("missing {}", path.display()));
         }
