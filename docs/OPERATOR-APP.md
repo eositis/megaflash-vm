@@ -9,7 +9,7 @@ Desktop app for running MegaFlash under Bramble: **Pico USB console** first, the
 - Rust stable (`rustup`)
 - Overlay Bramble built in this repo: `cmake -B build && make -C build bramble`
 - Firmware: `firmware/megaflash.uf2` (or sync via the app / `./scripts/sync-firmware-from-megaflash.sh`)
-- For //c mode: MAME (`brew install mame`), `iic.bin`, Ample companion ROM dumps as documented in [MAME-BRIDGE.md](MAME-BRIDGE.md)
+- For //c mode: MAME **0.288** (double-click `scripts/Install MAME 0.288.command`, or Operator **Install MAME 0.288…**). Do not `brew install mame` (that is 0.289 now). `iic.bin` is bundled.
 
 ## Develop
 
@@ -33,7 +33,7 @@ The app bundle lands under:
 
 `app/src-tauri/target/release/bundle/macos/MegaFlash Operator.app`
 
-First launch of a packaged `.app` runs **install setup**: network helper (admin), Accessibility TCC prompt + Settings, **Homebrew + python3** if no runnable interpreter (needed for the //c a2bus wait), and MAME **0.288** only (will not `brew install` a newer MAME formula). Demo SPI volumes from the build machine’s Operator profile are bundled and copied into Application Support on first use (`iic.bin` is the MegaFlash //c firmware). First launch can take several minutes and may show an Xcode Command Line Tools dialog.
+First launch of a packaged `.app` runs **install setup**: network helper (admin), Accessibility TCC prompt + Settings, **Homebrew + python3** if no runnable interpreter (needed for the //c a2bus wait). Demo SPI volumes are bundled. It also copies **Install MAME 0.288.command** to the Desktop (once). Double-click that (or **Install MAME 0.288…** in the app) — do not `brew install mame` (Homebrew is 0.289). First launch can take several minutes and may show an Xcode Command Line Tools dialog.
 
 **Important:** `cargo build --release` alone does **not** refresh that `.app`. After a fix, run `npm run tauri build` (or `npm run tauri dev`) so Finder/`open` is not launching a stale binary. Compare mtimes under `…/bundle/macos/…/MacOS/megaflash-operator` vs `target/release/megaflash-operator`.
 

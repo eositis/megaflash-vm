@@ -201,6 +201,28 @@ async fn run_install_setup(
 }
 
 #[tauri::command]
+async fn open_mame_installer(
+    state: State<'_, Arc<SessionState>>,
+) -> Result<(), String> {
+    let state = state_arc(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = state.get_settings_clone().megaflash_vm_root;
+        let path = std::path::PathBuf::from(root)
+            .join("scripts/Install MAME 0.288.command");
+        if !path.is_file() {
+            return Err(format!("missing {}", path.display()));
+        }
+        std::process::Command::new("open")
+            .arg(&path)
+            .status()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn xmodem_upload(
     app: AppHandle,
     state: State<'_, Arc<SessionState>>,
@@ -268,6 +290,7 @@ pub fn run() {
             net_helper_disable,
             run_install_setup,
             setup_needed,
+            open_mame_installer,
             xmodem_upload,
             xmodem_upload_message,
             sync_firmware,

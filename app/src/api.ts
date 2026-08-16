@@ -30,4 +30,5 @@ export const api = {
   }) => invoke<void>("place_mame_window", args),
   runInstallSetup: () => invoke<InstallSetupReport>("run_install_setup"),
   setupNeeded: () => invoke<boolean>("setup_needed"),
+  openMameInstaller: () => invoke<void>("open_mame_installer"),
 };

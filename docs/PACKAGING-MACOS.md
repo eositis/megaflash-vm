@@ -69,7 +69,7 @@ Installer = **signed DMG** (already built) that copies the `.app` to `/Applicati
 
 1. Create Application Support dirs; if `megaflash_vm_root` is still the GitHub path, retarget to `Contents/Resources/runtime`.
 2. **MAME check** (in order): env `MAME`, bundled relocatable mame (if we add it later), `/opt/homebrew/bin/mame`, `/usr/local/bin/mame`, `~/Library/Application Support/MegaFlashOperator/mame/mame`, Ample’s embedded mame if present.
-3. If MAME is missing: `brew install mame` **only** when Homebrew’s formula is still **0.288**. Otherwise tell the user to install 0.288; do not pull latest from GitHub/Homebrew.
+3. If MAME is missing: double-click **Install MAME 0.288.command** (extracts formula 0.288 into tap `local/mame288`). Do not `brew install mame` (that is 0.289).
 4. **ROM check**: if `roms/apple2c4` lacks CHR/keyboard, offer *Copy from Ample* or *Choose files*. Never download Apple dumps.
 5. First launch: admin dialog for tun/pf helper; one Accessibility TCC prompt and Privacy settings.
 
@@ -77,7 +77,7 @@ Installer = **signed DMG** (already built) that copies the `.app` to `/Applicati
 
 Prefer **user-owned** `~/Library/Application Support/MegaFlashOperator/mame/`:
 
-- If Homebrew exists and user consents: `brew install mame`, then record that path (simplest, uses their Cellar + `share/mame/plugins`).
+- If Homebrew exists: double-click **Install MAME 0.288.command** (`brew extract` 0.288). Do not install current core `mame`.
 - Else: fetch a **macOS arm64/x64 MAME binary** from a pinned [MAMEdev](https://github.com/mamedev/mame/releases) asset (or a mirror you control), unpack there, and set `MAME_STOCK_PLUGINS` to that tree’s `plugins/` (must contain `boot.lua`). Show license/GPL notice in the dialog.
 - Fallback: file picker for an already-installed `mame`.
 

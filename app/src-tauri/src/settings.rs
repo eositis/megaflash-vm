@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,6 +129,23 @@ fn looks_like_dev_tree(path: &str) -> bool {
     path.contains("Documents/GitHub")
 }
 
+fn publish_mame_installer(runtime: &Path) {
+    let src = runtime.join("scripts/Install MAME 0.288.command");
+    if !src.is_file() {
+        return;
+    }
+    let as_copy = writable_data_dir().join("Install MAME 0.288.command");
+    let _ = fs::copy(&src, &as_copy);
+    let _ = Command::new("chmod").arg("+x").arg(&as_copy).status();
+    if let Some(home) = dirs::home_dir() {
+        let desk = home.join("Desktop/Install MAME 0.288.command");
+        if !desk.is_file() {
+            let _ = fs::copy(&src, &desk);
+            let _ = Command::new("chmod").arg("+x").arg(&desk).status();
+        }
+    }
+}
+
 fn flash_looks_uninitialized(path: &Path) -> bool {
     match fs::metadata(path) {
         Err(_) => true,
@@ -192,6 +210,7 @@ fn normalize_packaged(s: &mut Settings) -> bool {
         s.iic_rom_path = rt.join("iic.bin").display().to_string();
         changed = true;
     }
+    publish_mame_installer(&rt);
     let flash = writable_data_dir().join("flash");
     let rt = Some(rt.as_path());
     let _ = seed_flash_file(

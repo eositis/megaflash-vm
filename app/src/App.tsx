@@ -554,6 +554,20 @@ function App() {
               >
                 Stop //c
               </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  void run(async () => {
+                    await api.openMameInstaller();
+                    setMsg(
+                      "Opened Install MAME 0.288 — finish that Terminal window, then Launch //c"
+                    );
+                  })
+                }
+              >
+                Install MAME 0.288…
+              </button>
             </div>
           </section>
 
