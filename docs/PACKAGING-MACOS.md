@@ -65,7 +65,7 @@ MegaFlash Operator.app
   flash/                     # writable SPI images (if not in-bundle)
 ```
 
-Installer = **signed DMG** (already built) that copies the `.app` to `/Applications`. First launch:
+Installer = **signed DMG** (already built) that copies the `.app` to `/Applications`. The DMG also contains **Install MAME 0.288.command**. First launch:
 
 1. Create Application Support dirs; if `megaflash_vm_root` is still the GitHub path, retarget to `Contents/Resources/runtime`.
 2. **MAME check** (in order): env `MAME`, bundled relocatable mame (if we add it later), `/opt/homebrew/bin/mame`, `/usr/local/bin/mame`, `~/Library/Application Support/MegaFlashOperator/mame/mame`, Ample’s embedded mame if present.
@@ -106,7 +106,7 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 - Only if download-from-GitHub is too flaky: `dylibbundler` a Homebrew mame into `runtime/mame/` plus GPL `COPYING` and source URL. Size ~0.5 GiB.
 
 **P3 — installer polish**  
-- DMG layout (Applications symlink). Optional `.pkg` is unnecessary if P0+P1 are solid.  
+- DMG layout (Applications symlink + **Install MAME 0.288.command**). Optional `.pkg` is unnecessary if P0+P1 are solid.  
 - Demo SPI volumes are already staged from the build profile (not empty templates).
 
 ## Dependencies that stay out of band

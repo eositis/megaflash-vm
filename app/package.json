@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "stage-runtime": "bash ../scripts/stage-operator-runtime.sh",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "bash ../scripts/tauri-with-dmg.sh"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

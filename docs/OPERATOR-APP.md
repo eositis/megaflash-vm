@@ -33,7 +33,7 @@ The app bundle lands under:
 
 `app/src-tauri/target/release/bundle/macos/MegaFlash Operator.app`
 
-First launch of a packaged `.app` runs **install setup**: network helper (admin), Accessibility TCC prompt + Settings, **Homebrew + python3** if no runnable interpreter (needed for the //c a2bus wait). Demo SPI volumes are bundled. It also copies **Install MAME 0.288.command** to the Desktop (once). Double-click that (or **Install MAME 0.288…** in the app) — do not `brew install mame` (Homebrew is 0.289). First launch can take several minutes and may show an Xcode Command Line Tools dialog.
+The DMG (`…/bundle/dmg/MegaFlash Operator_0.1.0_aarch64.dmg`) contains the **.app**, an Applications shortcut, **Install MAME 0.288.command**, and a short Read Me. Double-click the `.command` on that disk after opening Operator once (so Homebrew exists). Do not `brew install mame` (that is 0.289).
 
 **Important:** `cargo build --release` alone does **not** refresh that `.app`. After a fix, run `npm run tauri build` (or `npm run tauri dev`) so Finder/`open` is not launching a stale binary. Compare mtimes under `…/bundle/macos/…/MacOS/megaflash-operator` vs `target/release/megaflash-operator`.
 
