@@ -28,9 +28,18 @@ export type SessionStatus = {
   ptyPath: string;
 };
 
+export type InstallSetupReport = {
+  helperOk: boolean;
+  accessibilityOk: boolean;
+  mameOk: boolean;
+  mameVersion: string;
+  message: string;
+};
+
 export type NetHelperStatus = {
   installed: boolean;
   helperPath: string;
   canRunPasswordless: boolean;
   lastMessage: string;
 };
+

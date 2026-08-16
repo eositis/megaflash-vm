@@ -33,7 +33,7 @@ The app bundle lands under:
 
 `app/src-tauri/target/release/bundle/macos/MegaFlash Operator.app`
 
-Release builds **stage overlay runtime** (`bramble`, UF2, `iic.bin`, scripts) into the `.app` Resources. See [PACKAGING-MACOS.md](PACKAGING-MACOS.md). Notarize separately if you ship to another Mac.
+First launch of a packaged `.app` runs **install setup**: network helper (admin), Accessibility TCC prompt + Settings, and MAME **0.288** only (will not `brew install` a newer formula).
 
 **Important:** `cargo build --release` alone does **not** refresh that `.app`. After a fix, run `npm run tauri build` (or `npm run tauri dev`) so Finder/`open` is not launching a stale binary. Compare mtimes under `…/bundle/macos/…/MacOS/megaflash-operator` vs `target/release/megaflash-operator`.
 

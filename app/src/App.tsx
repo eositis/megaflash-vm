@@ -53,6 +53,8 @@ function App() {
   const [iicOpen, setIicOpen] = useState(() => !loadCollapsed("op.iicCollapsed", true));
   const [rightTab, setRightTab] = useState<"console" | "iic">("console");
 
+  const [setupBusy, setSetupBusy] = useState(false);
+
   const refresh = async () => {
     // Sequential invokes — avoid overlapping sync IPC on the UI thread.
     const s = await api.getSettings();
@@ -82,6 +84,33 @@ function App() {
         setNet(await api.netHelperStatus());
       } catch {
         /* optional */
+      }
+      try {
+        if (await api.setupNeeded()) {
+          setSetupBusy(true);
+          const report = await api.runInstallSetup();
+          if (report.message) {
+            setMsg(report.message);
+          }
+          if (!report.helperOk || !report.accessibilityOk || !report.mameOk) {
+            setError(
+              [
+                !report.helperOk ? "Network helper needs admin approval." : "",
+                !report.accessibilityOk
+                  ? "Turn on Accessibility for MegaFlash Operator."
+                  : "",
+                !report.mameOk ? "MAME 0.288 is not installed." : "",
+              ]
+                .filter(Boolean)
+                .join(" ")
+            );
+          }
+          setNet(await api.netHelperStatus());
+        }
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setSetupBusy(false);
       }
     })();
     void capWindowToScreen().catch(() => {});
@@ -144,9 +173,11 @@ function App() {
         </div>
       </header>
 
-      {(error || msg) && (
+      {(error || msg || setupBusy) && (
         <div className={`banner ${error ? "err" : "ok"}`}>
-          {error || msg}
+          {setupBusy
+            ? "Finishing install: network helper (admin), Accessibility, MAME 0.288…"
+            : error || msg}
         </div>
       )}
 

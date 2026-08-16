@@ -52,6 +52,7 @@ extern "C" {
     ) -> c_int;
     fn AXValueCreate(typ: u32, value_ptr: *const c_void) -> AXValueRef;
     fn AXIsProcessTrusted() -> u8;
+    fn AXIsProcessTrustedWithOptions(options: CFTypeRef) -> u8;
     fn CFRelease(cf: CFTypeRef);
     fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
     fn CFArrayGetCount(the_array: CFTypeRef) -> isize;
@@ -103,6 +104,31 @@ fn pgrep_mame_pid() -> Option<u32> {
 
 fn ax_trusted() -> bool {
     unsafe { AXIsProcessTrusted() != 0 }
+}
+
+/// One-shot TCC prompt + open Accessibility settings. Never call from the
+/// MAME place timer.
+pub fn prompt_accessibility() -> bool {
+    if ax_trusted() {
+        return true;
+    }
+    let key = CFString::new("AXTrustedCheckOptionPrompt");
+    let val = CFBoolean::true_value();
+    let dict = core_foundation::dictionary::CFDictionary::from_CFType_pairs(&[(
+        key.as_CFType(),
+        val.as_CFType(),
+    )]);
+    let now = unsafe {
+        AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef() as CFTypeRef) != 0
+    };
+    let _ = Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        .status();
+    now || ax_trusted()
+}
+
+pub fn is_accessibility_trusted() -> bool {
+    ax_trusted()
 }
 
 fn cfstr(s: &str) -> CFString {

@@ -2,6 +2,7 @@ mod mame_win;
 mod net_helper;
 mod session;
 mod settings;
+mod setup;
 mod xmodem;
 
 use session::SessionState;
@@ -175,6 +176,31 @@ async fn net_helper_disable() -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn setup_needed() -> Result<bool, String> {
+    Ok(tauri::async_runtime::spawn_blocking(setup::setup_needed)
+        .await
+        .map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+async fn run_install_setup(
+    state: State<'_, Arc<SessionState>>,
+) -> Result<setup::InstallSetupReport, String> {
+    let state = state_arc(&state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = state.get_settings_clone().megaflash_vm_root;
+        let report = setup::run_install_setup(&root);
+        let mut s = state.get_settings_clone();
+        s.network_helper_installed = report.helper_ok;
+        let _ = save_settings(&s);
+        state.set_settings(s);
+        Ok(report)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn xmodem_upload(
     app: AppHandle,
     state: State<'_, Arc<SessionState>>,
@@ -240,6 +266,8 @@ pub fn run() {
             net_helper_install,
             net_helper_enable,
             net_helper_disable,
+            run_install_setup,
+            setup_needed,
             xmodem_upload,
             xmodem_upload_message,
             sync_firmware,

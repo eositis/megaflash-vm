@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { NetHelperStatus, SessionStatus, Settings } from "./types";
+import type { InstallSetupReport, NetHelperStatus, SessionStatus, Settings } from "./types";
 
 export const api = {
   getSettings: () => invoke<Settings>("get_settings"),
@@ -28,4 +28,6 @@ export const api = {
     h: number;
     visible: boolean;
   }) => invoke<void>("place_mame_window", args),
+  runInstallSetup: () => invoke<InstallSetupReport>("run_install_setup"),
+  setupNeeded: () => invoke<boolean>("setup_needed"),
 };

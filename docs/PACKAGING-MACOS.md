@@ -69,9 +69,9 @@ Installer = **signed DMG** (already built) that copies the `.app` to `/Applicati
 
 1. Create Application Support dirs; if `megaflash_vm_root` is still the GitHub path, retarget to `Contents/Resources/runtime`.
 2. **MAME check** (in order): env `MAME`, bundled relocatable mame (if we add it later), `/opt/homebrew/bin/mame`, `/usr/local/bin/mame`, `~/Library/Application Support/MegaFlashOperator/mame/mame`, Ample’s embedded mame if present.
-3. If missing: **sheet** — *Download MAME*, *Install with Homebrew*, *Choose existing binary*. Do not silently `brew install`.
+3. If MAME is missing: `brew install mame` **only** when Homebrew’s formula is still **0.288**. Otherwise tell the user to install 0.288; do not pull latest from GitHub/Homebrew.
 4. **ROM check**: if `roms/apple2c4` lacks CHR/keyboard, offer *Copy from Ample* or *Choose files*. Never download Apple dumps.
-5. Existing **Install network helper…** (admin once). Accessibility prompt once for window docking.
+5. First launch: admin dialog for tun/pf helper; one Accessibility TCC prompt and Privacy settings.
 
 ### Download MAME (convenient location)
 
@@ -97,9 +97,9 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 - `MAME_STOCK_PLUGINS` also searches Application Support `mame/plugins`.  
 - Notarize still needs an Apple Developer ID (not done in P0).
 
-**P1 — MAME missing UX**  
-- Detect / prompt / download-or-brew as above. Persist `mamePath` + `mamePluginsPath` in `settings.json`.  
-- Gate **Launch //c** until MAME + companion dumps exist; USB console can work with only bramble+UF2.
+**P1 — first-launch install (implemented 2026-08-15)**  
+- Packaged (or incomplete) launch: admin dialog for tun/pf helper; one Accessibility TCC prompt + open Privacy settings.  
+- MAME **pinned to 0.288** (the build we tested). Will not `brew install` if Homebrew’s formula is a newer version. Existing 0.288 on PATH is used. Latest public MAME is not auto-pulled (SDL/plugin churn).
 
 **P2 — optional relocatable MAME**  
 - Only if download-from-GitHub is too flaky: `dylibbundler` a Homebrew mame into `runtime/mame/` plus GPL `COPYING` and source URL. Size ~0.5 GiB.
