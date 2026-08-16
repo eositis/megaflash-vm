@@ -31,6 +31,7 @@ export type SessionStatus = {
 export type InstallSetupReport = {
   helperOk: boolean;
   accessibilityOk: boolean;
+  pythonOk: boolean;
   mameOk: boolean;
   mameVersion: string;
   message: string;

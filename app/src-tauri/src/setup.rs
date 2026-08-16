@@ -15,6 +15,7 @@ pub const PINNED_MAME: &str = "0.288";
 pub struct InstallSetupReport {
     pub helper_ok: bool,
     pub accessibility_ok: bool,
+    pub python_ok: bool,
     pub mame_ok: bool,
     pub mame_version: String,
     pub message: String,
@@ -46,6 +47,72 @@ fn find_mame() -> Option<(PathBuf, String)> {
         }
     }
     None
+}
+
+fn python3_runnable() -> Option<PathBuf> {
+    for p in [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ] {
+        let pb = PathBuf::from(p);
+        if !pb.is_file() {
+            continue;
+        }
+        if Command::new(&pb)
+            .args(["-c", "import sys"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(pb);
+        }
+    }
+    None
+}
+
+fn ensure_python3(vm_root: &str) -> (bool, String) {
+    if let Some(p) = python3_runnable() {
+        return (true, format!("python3 ({})", p.display()));
+    }
+    let script = PathBuf::from(vm_root).join("scripts/macos-ensure-homebrew-python.sh");
+    if !script.is_file() {
+        return (
+            false,
+            format!("missing {} (Homebrew/python3 installer)", script.display()),
+        );
+    }
+    let out = Command::new("/bin/bash")
+        .arg(&script)
+        .env("HOMEBREW_NO_AUTO_UPDATE", "1")
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            if let Some(p) = python3_runnable() {
+                (
+                    true,
+                    format!("Installed Homebrew python3 ({})", p.display()),
+                )
+            } else {
+                (true, "Homebrew python3 installed.".into())
+            }
+        }
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let err = err.trim();
+            (
+                false,
+                if err.is_empty() {
+                    "Homebrew/python3 install failed (approve admin, install Xcode Command Line Tools if prompted, then relaunch).".into()
+                } else {
+                    format!("Homebrew/python3: {err}")
+                },
+            )
+        }
+        Err(e) => (false, format!("Homebrew/python3: {e}")),
+    }
 }
 
 fn brew_bin() -> Option<PathBuf> {
@@ -126,11 +193,12 @@ fn ensure_mame() -> (bool, String, String) {
 pub fn run_install_setup(vm_root: &str) -> InstallSetupReport {
     let helper = net_helper::status();
     let ax = mame_win::is_accessibility_trusted();
-    if helper.installed && helper.can_run_passwordless && ax {
+    if helper.installed && helper.can_run_passwordless && ax && python3_runnable().is_some() {
         if let Some((_, ver)) = find_mame() {
             return InstallSetupReport {
                 helper_ok: true,
                 accessibility_ok: true,
+                python_ok: true,
                 mame_ok: true,
                 mame_version: ver,
                 message: String::new(),
@@ -175,12 +243,16 @@ pub fn run_install_setup(vm_root: &str) -> InstallSetupReport {
         ok
     };
 
+    let (python_ok, py_msg) = ensure_python3(vm_root);
+    parts.push(py_msg);
+
     let (mame_ok, mame_version, mame_msg) = ensure_mame();
     parts.push(mame_msg);
 
     InstallSetupReport {
         helper_ok,
         accessibility_ok,
+        python_ok,
         mame_ok,
         mame_version,
         message: parts.join(" "),
@@ -191,6 +263,7 @@ pub fn setup_needed() -> bool {
     let h = net_helper::status();
     let helper_ok = h.installed && h.can_run_passwordless;
     let ax = mame_win::is_accessibility_trusted();
+    let py = python3_runnable().is_some();
     let mame = find_mame().is_some();
-    !helper_ok || !ax || !mame
+    !helper_ok || !ax || !py || !mame
 }

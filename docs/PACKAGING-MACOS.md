@@ -13,7 +13,7 @@ Planning note (2026-08-15). Not implemented. Goal: install MegaFlash Operator on
 | SPI flash images | **Yes (demo volumes)** | Staged from the build machine Operator profile (`spi-flash*.bin` + user config). |
 | **MAME binary + Homebrew dylibs** | **No (not as default)** | See below. First-run **download/install** is the practical path. |
 | Apple CHR / keyboard / Votrax dumps | **No** | Copyrighted. Keep current Ample-or-pick-files flow. |
-| Homebrew itself | No | Optional accelerator if the user already has it. |
+| Homebrew itself | **Yes (first launch)** | Official installer + `brew install python3` if no runnable python3. Admin dialog. |
 
 A **single DMG of Operator + overlay runtime** is feasible. A **single legal installer that also contains MAME + Apple ROMs** is not.
 
@@ -99,6 +99,7 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 
 **P1 — first-launch install (implemented 2026-08-15)**  
 - Packaged (or incomplete) launch: admin dialog for tun/pf helper; one Accessibility TCC prompt + open Privacy settings.  
+- If `python3` is missing or is only the Xcode stub: install **Homebrew** (admin) then `brew install python3` (`scripts/macos-ensure-homebrew-python.sh`). Launch //c’s a2bus wait needs a real interpreter.  
 - MAME **pinned to 0.288** (the build we tested). Will not `brew install` if Homebrew’s formula is a newer version. Existing 0.288 on PATH is used. Latest public MAME is not auto-pulled (SDL/plugin churn).
 
 **P2 — optional relocatable MAME**  
@@ -115,7 +116,7 @@ Current `tauri build` produced **aarch64** only. A second Intel Mac needs a sepa
 | Apple CHR / keyboard / Votrax | Ample or user’s dumps (unchanged) |
 | Accessibility | System Settings, once |
 | pf NAT helper | In-app install, once |
-| Python 3 | `/usr/bin/python3` (or finish unused Rust XMODEM and drop Python) |
+| Python 3 | First-launch Homebrew `python3` (not the `/usr/bin/python3` CLT stub) |
 | Node/Rust | **Build machine only**, not the target |
 
 ## Risk summary

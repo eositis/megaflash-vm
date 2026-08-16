@@ -92,12 +92,15 @@ function App() {
           if (report.message) {
             setMsg(report.message);
           }
-          if (!report.helperOk || !report.accessibilityOk || !report.mameOk) {
+          if (!report.helperOk || !report.accessibilityOk || !report.pythonOk || !report.mameOk) {
             setError(
               [
                 !report.helperOk ? "Network helper needs admin approval." : "",
                 !report.accessibilityOk
                   ? "Turn on Accessibility for MegaFlash Operator."
+                  : "",
+                !report.pythonOk
+                  ? "Homebrew python3 is required for Launch //c (approve admin; install Xcode Command Line Tools if macOS asks)."
                   : "",
                 !report.mameOk ? "MAME 0.288 is not installed." : "",
               ]
@@ -176,7 +179,7 @@ function App() {
       {(error || msg || setupBusy) && (
         <div className={`banner ${error ? "err" : "ok"}`}>
           {setupBusy
-            ? "Finishing install: network helper (admin), Accessibility, MAME 0.288…"
+            ? "Finishing install: network helper, Accessibility, Homebrew python3, MAME 0.288…"
             : error || msg}
         </div>
       )}
