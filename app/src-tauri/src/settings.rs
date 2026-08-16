@@ -25,6 +25,8 @@ pub struct Settings {
     pub allow_concurrent_windows: bool,
     pub megaflash_vm_root: String,
     pub network_helper_installed: bool,
+    #[serde(default)]
+    pub accessibility_prompted: bool,
 }
 
 impl Default for Settings {
@@ -65,6 +67,7 @@ impl Default for Settings {
             allow_concurrent_windows: false,
             megaflash_vm_root: root.display().to_string(),
             network_helper_installed: false,
+            accessibility_prompted: false,
         }
     }
 }
@@ -146,6 +149,27 @@ fn publish_mame_installer(runtime: &Path) {
     }
 }
 
+fn seed_companion_roms(runtime: &Path) {
+    for rel in [
+        "roms/apple2c4/341-0265-a.chr",
+        "roms/apple2c4/342-0132-c.e12",
+        "roms/votrsc01a/sc01a.bin",
+    ] {
+        let dest = writable_data_dir().join(rel);
+        if dest.is_file() {
+            continue;
+        }
+        let src = runtime.join(rel);
+        if !src.is_file() {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::copy(&src, &dest);
+    }
+}
+
 fn flash_looks_uninitialized(path: &Path) -> bool {
     match fs::metadata(path) {
         Err(_) => true,
@@ -211,6 +235,7 @@ fn normalize_packaged(s: &mut Settings) -> bool {
         changed = true;
     }
     publish_mame_installer(&rt);
+    seed_companion_roms(&rt);
     let flash = writable_data_dir().join("flash");
     let rt = Some(rt.as_path());
     let _ = seed_flash_file(

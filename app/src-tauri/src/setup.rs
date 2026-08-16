@@ -71,8 +71,8 @@ fn python3_runnable() -> Option<PathBuf> {
 }
 
 fn ensure_python3(vm_root: &str) -> (bool, String) {
-    if let Some(p) = python3_runnable() {
-        return (true, format!("python3 ({})", p.display()));
+    if python3_runnable().is_some() {
+        return (true, String::new());
     }
     let script = PathBuf::from(vm_root).join("scripts/macos-ensure-homebrew-python.sh");
     if !script.is_file() {
@@ -137,12 +137,8 @@ fn brew_install_mame() -> Result<(PathBuf, String), String> {
 }
 
 fn ensure_mame() -> (bool, String, String) {
-    if let Some((path, ver)) = find_mame() {
-        return (
-            true,
-            ver.clone(),
-            format!("MAME {ver} ({})", path.display()),
-        );
+    if let Some((_, ver)) = find_mame() {
+        return (true, ver, String::new());
     }
     match brew_install_mame() {
         Ok((path, ver)) => (
@@ -159,23 +155,29 @@ fn ensure_mame() -> (bool, String, String) {
 pub fn run_install_setup(vm_root: &str) -> InstallSetupReport {
     let helper = net_helper::status();
     let ax = mame_win::is_accessibility_trusted();
-    if helper.installed && helper.can_run_passwordless && ax && python3_runnable().is_some() {
-        if let Some((_, ver)) = find_mame() {
-            return InstallSetupReport {
-                helper_ok: true,
-                accessibility_ok: true,
-                python_ok: true,
-                mame_ok: true,
-                mame_version: ver,
-                message: String::new(),
-            };
-        }
+    let mut cfg = crate::settings::load_settings();
+    if helper.installed
+        && helper.can_run_passwordless
+        && python3_runnable().is_some()
+        && find_mame().is_some()
+        && (ax || cfg.accessibility_prompted)
+    {
+        return InstallSetupReport {
+            helper_ok: true,
+            accessibility_ok: true,
+            python_ok: true,
+            mame_ok: true,
+            mame_version: find_mame().map(|(_, v)| v).unwrap_or_default(),
+            message: String::new(),
+        };
     }
 
     let mut parts: Vec<String> = Vec::new();
 
     let helper = net_helper::status();
-    let helper_ok = if helper.installed {
+    let helper_ok = if helper.installed && helper.can_run_passwordless {
+        true
+    } else if helper.installed {
         parts.push("Network helper already installed.".into());
         true
     } else {
@@ -197,23 +199,30 @@ pub fn run_install_setup(vm_root: &str) -> InstallSetupReport {
     };
 
     let accessibility_ok = if mame_win::is_accessibility_trusted() {
-        parts.push("Accessibility already allowed.".into());
+        true
+    } else if cfg.accessibility_prompted {
         true
     } else {
         let ok = mame_win::prompt_accessibility();
-        parts.push(if ok {
-            "Accessibility allowed.".into()
-        } else {
-            "Enable MegaFlash Operator in System Settings → Privacy & Security → Accessibility, then relaunch.".into()
-        });
-        ok
+        cfg.accessibility_prompted = true;
+        let _ = crate::settings::save_settings(&cfg);
+        if !ok {
+            parts.push(
+                "Enable MegaFlash Operator in System Settings → Privacy & Security → Accessibility if you want the //c window docked.".into(),
+            );
+        }
+        true
     };
 
     let (python_ok, py_msg) = ensure_python3(vm_root);
-    parts.push(py_msg);
+    if !py_msg.is_empty() {
+        parts.push(py_msg);
+    }
 
     let (mame_ok, mame_version, mame_msg) = ensure_mame();
-    parts.push(mame_msg);
+    if !mame_msg.is_empty() {
+        parts.push(mame_msg);
+    }
 
     InstallSetupReport {
         helper_ok,
@@ -228,8 +237,9 @@ pub fn run_install_setup(vm_root: &str) -> InstallSetupReport {
 pub fn setup_needed() -> bool {
     let h = net_helper::status();
     let helper_ok = h.installed && h.can_run_passwordless;
-    let ax = mame_win::is_accessibility_trusted();
+    let cfg = crate::settings::load_settings();
+    let ax_done = mame_win::is_accessibility_trusted() || cfg.accessibility_prompted;
     let py = python3_runnable().is_some();
     let mame = find_mame().is_some();
-    !helper_ok || !ax || !py || !mame
+    !helper_ok || !ax_done || !py || !mame
 }

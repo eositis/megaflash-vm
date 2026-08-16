@@ -9,7 +9,7 @@ Desktop app for running MegaFlash under Bramble: **Pico USB console** first, the
 - Rust stable (`rustup`)
 - Overlay Bramble built in this repo: `cmake -B build && make -C build bramble`
 - Firmware: `firmware/megaflash.uf2` (or sync via the app / `./scripts/sync-firmware-from-megaflash.sh`)
-- For //c mode: MAME via `brew install mame` (double-click `scripts/Install MAME.command` or Operator **Install MAME…**). `iic.bin` is bundled.
+- For //c mode: MAME via `brew install mame`. CHR/keyboard dumps are staged into the app (or fetched if missing). `iic.bin` is the MegaFlash firmware.
 
 ## Develop
 

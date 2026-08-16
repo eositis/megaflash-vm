@@ -17,6 +17,7 @@ export type Settings = {
   allowConcurrentWindows: boolean;
   megaflashVmRoot: string;
   networkHelperInstalled: boolean;
+  accessibilityPrompted?: boolean;
 };
 
 export type SessionStatus = {

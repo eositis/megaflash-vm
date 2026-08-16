@@ -121,9 +121,6 @@ pub fn prompt_accessibility() -> bool {
     let now = unsafe {
         AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef() as CFTypeRef) != 0
     };
-    let _ = Command::new("open")
-        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-        .status();
     now || ax_trusted()
 }
 

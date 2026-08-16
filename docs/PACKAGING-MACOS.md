@@ -12,7 +12,7 @@ Planning note (2026-08-15). Not implemented. Goal: install MegaFlash Operator on
 | Bramble `macos-cyw43-pf-nat.sh` | Yes (copy in) | Helper install currently requires sibling `../Bramble`. |
 | SPI flash images | **Yes (demo volumes)** | Staged from the build machine Operator profile (`spi-flash*.bin` + user config). |
 | **MAME binary + Homebrew dylibs** | **No (not as default)** | See below. First-run **download/install** is the practical path. |
-| Apple CHR / keyboard / Votrax dumps | **No** | Copyrighted. Keep current Ample-or-pick-files flow. |
+| Apple CHR / keyboard / Votrax dumps | **Yes (demo)** | Staged from the build machine Operator/Ample dumps. Runtime will also try Ample, then archive.org if still missing. |
 | Homebrew itself | **Yes (first launch)** | Official installer + `brew install python3` if no runnable python3. Admin dialog. |
 
 A **single DMG of Operator + overlay runtime** is feasible. A **single legal installer that also contains MAME + Apple ROMs** is not.

@@ -97,10 +97,24 @@ fi
 
 mkdir -p "$STAGE_DIR" "$VOX_DIR"
 
-# Stage a self-contained romset. IMPORTANT: do not leave Ample on the rompath —
-# MAME prefers CRC-matching dumps and will silently ignore MegaFlash iic.bin if
-# stock 3410445b.256 is also visible.
-stage_from_ample() {
+copy_dump() {
+  local dest="$1"
+  shift
+  if [[ -f "$dest" ]]; then
+    return 0
+  fi
+  local src
+  for src in "$@"; do
+    if [[ -f "$src" ]]; then
+      mkdir -p "$(dirname "$dest")"
+      cp -p "$src" "$dest"
+      return 0
+    fi
+  done
+  return 1
+}
+
+unzip_member() {
   local zip="$1" member="$2" dest="$3"
   if [[ -f "$dest" ]]; then
     return 0
@@ -108,25 +122,65 @@ stage_from_ample() {
   if [[ ! -f "$zip" ]]; then
     return 1
   fi
-  unzip -o -j -qq "$zip" "$member" -d "$(dirname "$dest")"
+  unzip -o -j -qq "$zip" "$member" -d "$(dirname "$dest")" && [[ -f "$dest" ]]
 }
+
+fetch_zip_member() {
+  local url="$1" member="$2" dest="$3"
+  if [[ -f "$dest" ]]; then
+    return 0
+  fi
+  command -v curl >/dev/null 2>&1 || return 1
+  local tmp
+  tmp="$(mktemp "${TMPDIR:-/tmp}/megaflash-rom.XXXXXX.zip")"
+  if curl -fsSL --retry 2 -o "$tmp" "$url"; then
+    unzip -o -j -qq "$tmp" "$member" -d "$(dirname "$dest")" || true
+  fi
+  rm -f "$tmp"
+  [[ -f "$dest" ]]
+}
+
+# Stage a self-contained romset. Do not leave Ample on the rompath — MAME
+# prefers CRC-matching dumps and will silently ignore MegaFlash iic.bin.
+AS_ROMS="${MEGAFLASH_DATA_DIR:-$DATA}/roms"
+copy_dump "$STAGE_DIR/341-0265-a.chr" \
+  "$ROOT/roms/apple2c4/341-0265-a.chr" \
+  "$AS_ROMS/apple2c4/341-0265-a.chr" || true
+copy_dump "$STAGE_DIR/342-0132-c.e12" \
+  "$ROOT/roms/apple2c4/342-0132-c.e12" \
+  "$AS_ROMS/apple2c4/342-0132-c.e12" || true
+copy_dump "$VOX_DIR/sc01a.bin" \
+  "$ROOT/roms/votrsc01a/sc01a.bin" \
+  "$AS_ROMS/votrsc01a/sc01a.bin" || true
 
 APPLE2C_ZIP="$AMPLE_ROMS/apple2c.zip"
 VOTR_ZIP="$AMPLE_ROMS/votrsc01a.zip"
+unzip_member "$APPLE2C_ZIP" "341-0265-a.chr" "$STAGE_DIR/341-0265-a.chr" || true
+unzip_member "$APPLE2C_ZIP" "342-0132-c.e12" "$STAGE_DIR/342-0132-c.e12" || true
+unzip_member "$VOTR_ZIP" "sc01a.bin" "$VOX_DIR/sc01a.bin" || true
 
-if ! stage_from_ample "$APPLE2C_ZIP" "341-0265-a.chr" "$STAGE_DIR/341-0265-a.chr" || \
-   ! stage_from_ample "$APPLE2C_ZIP" "342-0132-c.e12" "$STAGE_DIR/342-0132-c.e12"; then
-  if [[ ! -f "$STAGE_DIR/341-0265-a.chr" || ! -f "$STAGE_DIR/342-0132-c.e12" ]]; then
-    echo "[mame] missing CHR/keyboard dumps under $STAGE_DIR" >&2
-    echo "  Need 341-0265-a.chr and 342-0132-c.e12 (from Ample apple2c.zip or your dumps)" >&2
-    exit 1
-  fi
+if [[ ! -f "$STAGE_DIR/341-0265-a.chr" || ! -f "$STAGE_DIR/342-0132-c.e12" ]]; then
+  echo "[mame] fetching apple2c companion dumps…" >&2
+  fetch_zip_member \
+    "https://archive.org/download/MAME_0.225_ROMs_merged/apple2c.zip" \
+    "341-0265-a.chr" "$STAGE_DIR/341-0265-a.chr" || true
+  fetch_zip_member \
+    "https://archive.org/download/MAME_0.225_ROMs_merged/apple2c.zip" \
+    "342-0132-c.e12" "$STAGE_DIR/342-0132-c.e12" || true
 fi
-if ! stage_from_ample "$VOTR_ZIP" "sc01a.bin" "$VOX_DIR/sc01a.bin"; then
-  if [[ ! -f "$VOX_DIR/sc01a.bin" ]]; then
-    echo "[mame] missing $VOX_DIR/sc01a.bin (from Ample votrsc01a.zip)" >&2
-    exit 1
-  fi
+if [[ ! -f "$VOX_DIR/sc01a.bin" ]]; then
+  fetch_zip_member \
+    "https://archive.org/download/MAME_0.225_ROMs_merged/votrsc01a.zip" \
+    "sc01a.bin" "$VOX_DIR/sc01a.bin" || true
+fi
+
+if [[ ! -f "$STAGE_DIR/341-0265-a.chr" || ! -f "$STAGE_DIR/342-0132-c.e12" ]]; then
+  echo "[mame] missing CHR/keyboard dumps under $STAGE_DIR" >&2
+  echo "  Need 341-0265-a.chr and 342-0132-c.e12" >&2
+  exit 1
+fi
+if [[ ! -f "$VOX_DIR/sc01a.bin" ]]; then
+  echo "[mame] warning: missing $VOX_DIR/sc01a.bin (speech ROM); continuing" >&2
 fi
 
 # Always refresh MegaFlash system ROM into the expected dump name.

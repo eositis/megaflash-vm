@@ -97,7 +97,7 @@ function App() {
               [
                 !report.helperOk ? "Network helper needs admin approval." : "",
                 !report.accessibilityOk
-                  ? "Turn on Accessibility for MegaFlash Operator."
+                  ? "Turn on Accessibility for MegaFlash Operator if you want the //c window docked."
                   : "",
                 !report.pythonOk
                   ? "Homebrew python3 is required for Launch //c (approve admin; install Xcode Command Line Tools if macOS asks)."
